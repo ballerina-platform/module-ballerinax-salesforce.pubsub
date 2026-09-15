@@ -1,3 +1,4 @@
+import ballerina/lang.runtime;
 import ballerina/test;
 
 isolated class CountingSchemaLoader {
@@ -8,6 +9,27 @@ isolated class CountingSchemaLoader {
         lock {
             self.calls += 1;
         }
+        return "{\"type\":\"record\",\"name\":\"Order\",\"fields\":[]}";
+    }
+
+    isolated function callCount() returns int {
+        lock {
+            return self.calls;
+        }
+    }
+}
+
+// A deliberately slow loader, so genuinely concurrent callers overlap during
+// the load rather than one finishing before the next even starts.
+isolated class SlowCountingSchemaLoader {
+    *SchemaLoader;
+    private int calls = 0;
+
+    public isolated function load(string tenantId, string schemaId) returns string|error {
+        lock {
+            self.calls += 1;
+        }
+        runtime:sleep(0.2);
         return "{\"type\":\"record\",\"name\":\"Order\",\"fields\":[]}";
     }
 
@@ -52,6 +74,35 @@ function testSchemaCacheReusesAResolvedTenantSchema() returns error? {
     test:assertEquals(first, "{\"type\":\"record\",\"name\":\"Order\",\"fields\":[]}");
     test:assertEquals(second, first);
     test:assertEquals(loader.callCount(), 1);
+}
+
+// This fails if genuinely concurrent callers racing a cold cache each start
+// their own load instead of sharing one in-flight load: unlike the sequential
+// reuse test above, every caller here starts before any of them can have
+// observed a cached result yet.
+@test:Config {}
+function testSchemaCacheConcurrentMissesShareOneLoad() returns error? {
+    SchemaCache cache = new;
+    SlowCountingSchemaLoader loader = new;
+
+    future<string|error>[] calls = [];
+    foreach int _ in 0 ..< 5 {
+        future<string|error> call = start cache.getOrLoad("00D000000000004", "schema-concurrent", loader);
+        calls.push(call);
+    }
+    string[] results = [];
+    foreach future<string|error> call in calls {
+        string|error result = wait call;
+        if result is string {
+            results.push(result);
+        }
+    }
+
+    test:assertEquals(results.length(), 5, "every concurrent caller should receive the loaded schema");
+    foreach string result in results {
+        test:assertEquals(result, "{\"type\":\"record\",\"name\":\"Order\",\"fields\":[]}");
+    }
+    test:assertEquals(loader.callCount(), 1, "concurrent misses on a cold cache must share a single load");
 }
 
 // This fails if schema IDs are cached globally without tenant scoping, which
