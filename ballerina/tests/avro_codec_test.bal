@@ -78,14 +78,14 @@ function testAvroCodecEncodesNestedRecord() returns error? {
 // ChangeEventHeader.changedFields) needs the same primitive-array coercion as
 // a top-level array field. Normalizing only top-level fields left this value
 // untyped and made the underlying Avro encoder fail with an internal null
-// pointer error rather than a normal connector error. (Decoding this same
-// shape hits a separate, pre-existing limitation in the underlying Avro
-// library's own nested-array decode support, so this only covers encode.)
+// pointer error rather than a normal connector error.
 @test:Config {}
-function testAvroCodecEncodesArrayNestedInsideRecord() returns error? {
+function testAvroCodecRoundTripsArrayNestedInsideRecord() returns error? {
     string schema = "{\"type\":\"record\",\"name\":\"NestedArrayEvent\",\"fields\":[" +
         "{\"name\":\"header\",\"type\":{\"type\":\"record\",\"name\":\"Header\",\"fields\":[" +
         "{\"name\":\"changedFields\",\"type\":{\"type\":\"array\",\"items\":\"string\"}}]}}]}";
     byte[] bytes = check encodePayload(schema, {"header": {"changedFields": ["Name", "Phone"]}});
-    test:assertTrue(bytes.length() > 0);
+    Payload decoded = check decodePayload(schema, bytes);
+    map<anydata> header = check decoded["header"].ensureType();
+    test:assertEquals(header["changedFields"], ["Name", "Phone"]);
 }

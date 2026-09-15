@@ -20,6 +20,17 @@ final string FIXTURE_ALWAYS_AMBIGUOUS_TOPIC = "/event/FixtureAlwaysAmbiguous__e"
 // Must start with "/data/": that prefix is what routes an event through CDC
 // normalization at all (see eventFromConsumerEvent in consumer_event.bal).
 final string FIXTURE_MALFORMED_CDC_TOPIC = "/data/FixtureMalformedCdc__e";
+final string FIXTURE_CDC_EVENTS_TOPIC = "/data/FixtureCdcEvents__e";
+final string FIXTURE_INVALID_CDC_SCHEMA_TOPIC = "/data/FixtureInvalidCdcSchema__e";
+final string FIXTURE_INVALID_CDC_SCHEMA_ID = "fixture-invalid-cdc-schema";
+// Avro binary has no embedded type tags, so decoding against a "merely
+// different" schema can silently succeed on whatever leading bytes happen to
+// parse (this was tried and did not reliably fail). A fixed-size field far
+// larger than any real payload reads a fixed number of raw bytes with no
+// length prefix at all, so it reliably runs past the end of the buffer and
+// throws regardless of the actual bytes' content.
+final string FIXTURE_INVALID_CDC_SCHEMA = "{\"type\":\"record\",\"name\":\"FixtureWrongShape\",\"fields\":[" +
+    "{\"name\":\"oversized\",\"type\":{\"type\":\"fixed\",\"name\":\"Oversized\",\"size\":10000}}]}";
 final string FIXTURE_SCHEMA_ID = "fixture-schema";
 final string FIXTURE_SCHEMA = "{\"type\":\"record\",\"name\":\"Fixture\",\"fields\":[{\"name\":\"Message__c\",\"type\":\"string\"}]}";
 final string FIXTURE_CDC_SCHEMA_ID = "fixture-cdc-schema";
@@ -35,7 +46,8 @@ final string[] FIXTURE_TOPICS = [
     FIXTURE_TOPIC, FIXTURE_ERROR_TOPIC, FIXTURE_RECONNECT_TOPIC, FIXTURE_MULTI_EVENT_TOPIC,
     FIXTURE_PERMISSION_DENIED_TOPIC, FIXTURE_REPLAY_RECOVERY_TOPIC, FIXTURE_STUCK_TOPIC,
     FIXTURE_MULTI_CHUNK_TOPIC, FIXTURE_AMBIGUOUS_CHUNK_TOPIC, FIXTURE_ALWAYS_AMBIGUOUS_TOPIC,
-    FIXTURE_MALFORMED_CDC_TOPIC, FIXTURE_FLOW_CONTROL_TOPIC
+    FIXTURE_MALFORMED_CDC_TOPIC, FIXTURE_FLOW_CONTROL_TOPIC, FIXTURE_CDC_EVENTS_TOPIC,
+    FIXTURE_INVALID_CDC_SCHEMA_TOPIC
 ];
 
 isolated int fixtureReconnectTopicAttempts = 0;
@@ -279,6 +291,14 @@ service "PubSub" on fixtureListener {
         if request.schema_id == FIXTURE_CDC_SCHEMA_ID {
             return {schema_json: FIXTURE_CDC_SCHEMA, schema_id: FIXTURE_CDC_SCHEMA_ID};
         }
+        if request.schema_id == FIXTURE_INVALID_CDC_SCHEMA_ID {
+            // Deliberately wrong: the event bytes for this schema ID are
+            // encoded with FIXTURE_CDC_SCHEMA, but GetSchema serves this
+            // unrelated schema for it -- simulating Salesforce returning a
+            // stale or incorrect writer schema, distinct from a malformed
+            // CDC bitmap in an otherwise-correct decode.
+            return {schema_json: FIXTURE_INVALID_CDC_SCHEMA, schema_id: FIXTURE_INVALID_CDC_SCHEMA_ID};
+        }
         if request.schema_id != FIXTURE_SCHEMA_ID {
             return error("unexpected schema request");
         }
@@ -289,7 +309,12 @@ service "PubSub" on fixtureListener {
         if FIXTURE_TOPICS.indexOf(request.topic_name) is () {
             return error("unexpected topic request");
         }
-        string schemaId = request.topic_name == FIXTURE_MALFORMED_CDC_TOPIC ? FIXTURE_CDC_SCHEMA_ID : FIXTURE_SCHEMA_ID;
+        string schemaId = FIXTURE_SCHEMA_ID;
+        if request.topic_name == FIXTURE_MALFORMED_CDC_TOPIC || request.topic_name == FIXTURE_CDC_EVENTS_TOPIC {
+            schemaId = FIXTURE_CDC_SCHEMA_ID;
+        } else if request.topic_name == FIXTURE_INVALID_CDC_SCHEMA_TOPIC {
+            schemaId = FIXTURE_INVALID_CDC_SCHEMA_ID;
+        }
         return {topic_name: request.topic_name, can_publish: true, can_subscribe: true, schema_id: schemaId};
     }
 
@@ -385,6 +410,55 @@ service "PubSub" on fixtureListener {
                 events: [{event: {id: "malformed-cdc-event", schema_id: FIXTURE_CDC_SCHEMA_ID, payload: cdcPayload}, replay_id: [1]}]
             };
             return new stream<wire:FetchResponse, error?>(new FixtureOneResponseThenIdleStream(cdcResponse));
+        }
+        if first.value.topic_name == FIXTURE_CDC_EVENTS_TOPIC {
+            // "0x02" sets bit 1 in FIXTURE_CDC_SCHEMA's field order
+            // (ChangeEventHeader=0, Name=1), i.e. Name changed.
+            byte[] createPayload = check encodePayload(FIXTURE_CDC_SCHEMA, {
+                "ChangeEventHeader": {
+                    "entityName": "Account", "changeType": "CREATE",
+                    "changedFields": ["0x02"], "nulledFields": [], "diffFields": []
+                },
+                "Name": "Acme Inc"
+            });
+            byte[] updatePayload = check encodePayload(FIXTURE_CDC_SCHEMA, {
+                "ChangeEventHeader": {
+                    "entityName": "Account", "changeType": "UPDATE",
+                    "changedFields": ["0x02"], "nulledFields": [], "diffFields": []
+                },
+                "Name": "Acme International"
+            });
+            byte[] deletePayload = check encodePayload(FIXTURE_CDC_SCHEMA, {
+                "ChangeEventHeader": {
+                    "entityName": "Account", "changeType": "DELETE",
+                    "changedFields": [], "nulledFields": [], "diffFields": []
+                },
+                "Name": ()
+            });
+            wire:FetchResponse cdcEventsResponse = {
+                events: [
+                    {event: {id: "cdc-create", schema_id: FIXTURE_CDC_SCHEMA_ID, payload: createPayload}, replay_id: [1]},
+                    {event: {id: "cdc-update", schema_id: FIXTURE_CDC_SCHEMA_ID, payload: updatePayload}, replay_id: [2]},
+                    {event: {id: "cdc-delete", schema_id: FIXTURE_CDC_SCHEMA_ID, payload: deletePayload}, replay_id: [3]}
+                ]
+            };
+            return new stream<wire:FetchResponse, error?>(new FixtureOneResponseThenIdleStream(cdcEventsResponse));
+        }
+        if first.value.topic_name == FIXTURE_INVALID_CDC_SCHEMA_TOPIC {
+            byte[] mismatchedPayload = check encodePayload(FIXTURE_CDC_SCHEMA, {
+                "ChangeEventHeader": {
+                    "entityName": "Account", "changeType": "UPDATE",
+                    "changedFields": ["0x02"], "nulledFields": [], "diffFields": []
+                },
+                "Name": "Acme"
+            });
+            wire:FetchResponse invalidSchemaResponse = {
+                events: [{
+                    event: {id: "invalid-schema-event", schema_id: FIXTURE_INVALID_CDC_SCHEMA_ID, payload: mismatchedPayload},
+                    replay_id: [1]
+                }]
+            };
+            return new stream<wire:FetchResponse, error?>(new FixtureOneResponseThenIdleStream(invalidSchemaResponse));
         }
         if first.value.topic_name == FIXTURE_MULTI_EVENT_TOPIC {
             wire:ConsumerEvent[] events = [];
@@ -750,6 +824,32 @@ isolated class FailOnceReplayStore {
     }
 }
 
+// Records "<changeType>:<Name or <absent>>" for every delivered CDC event, in
+// order, so a test can confirm each change type normalizes distinctly (a
+// CREATE/UPDATE's changed Name value present in changedData, a DELETE's
+// absent) without needing to capture full payload structures per test.
+isolated service class FixtureCdcRecorderService {
+    *Service;
+    private string[] recordedDeliveries = [];
+
+    remote function onEvent(Event event) returns error? {
+        map<anydata> metadata = check event.payload["metadata"].ensureType();
+        map<anydata> changedData = check event.payload["changedData"].ensureType();
+        string changeType = <string>metadata["changeType"];
+        anydata? name = changedData["Name"];
+        string entry = changeType + ":" + (name is string ? name : "<absent>");
+        lock {
+            self.recordedDeliveries.push(entry);
+        }
+    }
+
+    isolated function deliveries() returns string[] {
+        lock {
+            return self.recordedDeliveries.clone();
+        }
+    }
+}
+
 isolated service class FixtureErrorAwareService {
     *Service;
     private boolean notified = false;
@@ -955,6 +1055,94 @@ function testListenerStopsAfterMalformedCdcEventFailsNormalization() returns err
     });
     test:assertTrue(replayId is (), "a never-delivered event must not be checkpointed");
     check endpoint.immediateStop();
+}
+
+// This fails if a CDC decode/normalization failure on one topic leaves other
+// attached topics running, unlike an ordinary transport failure (already
+// proven terminal listener-wide by testListenerStopsAllTopicsWhenOneFailsTerminally).
+@test:Config {}
+function testListenerStopsAllTopicsWhenCdcNormalizationFailsOnOneTopic() returns error? {
+    InMemoryReplayStore replayStore = new;
+    Listener endpoint = check new ({
+        connection: {
+            auth: <http:BearerTokenConfig>{token: "fixture-token"},
+            instanceUrl: "https://fixture.my.salesforce.com",
+            tenantId: "00DFixture000001",
+            endpoint: "https://localhost:" + FIXTURE_PORT.toString(),
+            grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
+        },
+        replayStore,
+        subscriptionDefaults: {reconnectRetry: {maxRetries: 0}}
+    });
+    Service healthyHandler = service object {
+        remote function onEvent(Event event) returns error? {
+            return ();
+        }
+    };
+    FixtureCountingService cdcHandler = new;
+    check endpoint.attach(healthyHandler, FIXTURE_TOPIC);
+    check endpoint.attach(cdcHandler, FIXTURE_MALFORMED_CDC_TOPIC);
+    check endpoint.'start();
+    runtime:sleep(0.3);
+    ListenerError? lastError = endpoint.getLastError();
+    test:assertTrue(lastError is ListenerError);
+    if lastError is ListenerError {
+        test:assertEquals(lastError.topic, FIXTURE_MALFORMED_CDC_TOPIC);
+    }
+    check endpoint.immediateStop();
+}
+
+// This fails if decoding an event against a writer schema that does not
+// match its actual bytes (Salesforce serving a stale/incorrect schema, as
+// distinct from a malformed-but-schema-conformant CDC bitmap) is not treated
+// as a normal terminal Subscribe failure.
+@test:Config {}
+function testListenerTreatsMismatchedCdcWriterSchemaAsTerminal() returns error? {
+    InMemoryReplayStore replayStore = new;
+    Listener endpoint = check new ({
+        connection: {
+            auth: <http:BearerTokenConfig>{token: "fixture-token"},
+            instanceUrl: "https://fixture.my.salesforce.com",
+            tenantId: "00DFixture000001",
+            endpoint: "https://localhost:" + FIXTURE_PORT.toString(),
+            grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
+        },
+        replayStore,
+        subscriptionDefaults: {reconnectRetry: {maxRetries: 0}}
+    });
+    FixtureCountingService handler = new;
+    check endpoint.attach(handler, FIXTURE_INVALID_CDC_SCHEMA_TOPIC);
+    check endpoint.'start();
+    runtime:sleep(0.3);
+    test:assertTrue(endpoint.getLastError() is ListenerError);
+    test:assertEquals(handler.deliveryCount(), 0);
+    check endpoint.immediateStop();
+}
+
+// This fails if CREATE, UPDATE, and DELETE change events are not each
+// normalized correctly over the real (now-fixed) Avro decode path: a
+// CREATE/UPDATE with Name in changedFields must surface it in changedData,
+// while a DELETE (nothing changed) must not.
+@test:Config {}
+function testListenerNormalizesCreateUpdateDeleteChangeEventsOverTheWire() returns error? {
+    InMemoryReplayStore replayStore = new;
+    Listener endpoint = check new ({
+        connection: {
+            auth: <http:BearerTokenConfig>{token: "fixture-token"},
+            instanceUrl: "https://fixture.my.salesforce.com",
+            tenantId: "00DFixture000001",
+            endpoint: "https://localhost:" + FIXTURE_PORT.toString(),
+            grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
+        },
+        replayStore
+    });
+    FixtureCdcRecorderService handler = new;
+    check endpoint.attach(handler, FIXTURE_CDC_EVENTS_TOPIC);
+    check endpoint.'start();
+    runtime:sleep(0.3);
+    check endpoint.immediateStop();
+
+    test:assertEquals(handler.deliveries(), ["CREATE:Acme Inc", "UPDATE:Acme International", "DELETE:<absent>"]);
 }
 
 // This fails if Salesforce rejecting a stored replay cursor as invalid or
