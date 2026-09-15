@@ -1,116 +1,156 @@
-# Ballerina Salesforce Pub/Sub connector connector
+# Ballerina Salesforce Pub/Sub connector
 
-[![Build](https://github.com/ballerina-platform/module-ballerinax-salesforce.pubsub/actions/workflows/ci.yml/badge.svg)](https://github.com/ballerina-platform/module-ballerinax-salesforce.pubsub/actions/workflows/ci.yml)
-[![GitHub Last Commit](https://img.shields.io/github/last-commit/ballerina-platform/module-ballerinax-salesforce.pubsub.svg)](https://github.com/ballerina-platform/module-ballerinax-salesforce.pubsub/commits/master)
-[![GitHub Issues](https://img.shields.io/github/issues/ballerina-platform/ballerina-library/module/salesforce.pubsub.svg?label=Open%20Issues)](https://github.com/ballerina-platform/ballerina-library/labels/module%salesforce.pubsub)
+`ballerinax/salesforce.pubsub` publishes Salesforce platform events and consumes Pub/Sub API event streams through separate `Publisher` and `Listener` APIs. Generated gRPC records, authentication metadata, and Avro bytes remain inside the connector.
 
-## Overview
+## Status
 
-[//]: # (TODO: Add overview mentioning the purpose of the module, supported REST API versions, and other high-level details.)
+This is an in-progress first-cut implementation. Bearer-token, refresh-token,
+client-credentials, and password-grant authentication are implemented inside
+this package, alongside unary publishing, dynamic Avro envelopes, in-memory
+replay checkpoints, and topic-scoped sequential consumption. Pub/Sub reuses
+the public Salesforce OAuth configuration and TokenStore contracts, but does
+not depend on the Salesforce connector's private CometD token manager.
 
-## Setup guide
+## Configure a connection
 
-[//]: # (TODO: Add detailed steps to obtain credentials and configure the module.)
+Supply the Salesforce instance URL, the Salesforce **org** ID (normally starts with `00D`), and the Pub/Sub endpoint. The connector sends `accesstoken`, `instanceurl`, and `tenantid` internally for every unary call and new stream.
 
-## Quickstart
+```ballerina
+import ballerina/http;
+import ballerinax/salesforce.pubsub;
 
-[//]: # (TODO: Add a quickstart guide to demonstrate a basic functionality of the module, including sample code snippets.)
+pubsub:ConnectionConfig connection = {
+    auth: <http:BearerTokenConfig>{token: "${ACCESS_TOKEN}"},
+    instanceUrl: "https://your-org.my.salesforce.com",
+    tenantId: "00D..."
+};
+```
 
-## Examples
+Do not commit access tokens, refresh tokens, or event payloads to source control. Use configurable values or deployment secret management instead.
 
-The `Salesforce Pub/Sub connector` connector provides practical examples illustrating usage in various scenarios. Explore these [examples](https://github.com/module-ballerinax-salesforce.pubsub/tree/main/examples/), covering the following use cases:
+For a refresh-token grant, the connector retains the current access token and
+any Salesforce-rotated refresh token in `tokenStore`. The default is
+`salesforce:InMemoryTokenStore`, suitable for a single process. Supply a
+shared `salesforce:TokenStore` when a rotated token must survive a restart or
+be coordinated between processes. When Salesforce omits `expires_in`, set
+`sessionTimeout` to your org's session lifetime; it defaults to 900 seconds
+and the connector renews 60 seconds early.
 
-[//]: # (TODO: Add examples)
+`ConnectionConfig.grpcConfig` accepts Ballerina `grpc:ClientConfiguration` for
+TLS trust material, client certificates, proxy/pool settings, compression, and
+inbound message limits. The connector applies `connectionTimeout` to every
+owned channel, including channels created for a Listener restart.
 
-## Build from the source
+```ballerina
+import ballerina/grpc;
 
-### Setting up the prerequisites
+pubsub:ConnectionConfig connection = {
+    auth: <http:BearerTokenConfig>{token: accessToken},
+    instanceUrl: instanceUrl,
+    tenantId: tenantId,
+    connectionTimeout: 30,
+    grpcConfig: <grpc:ClientConfiguration>{
+        secureSocket: {cert: "./salesforce-ca.pem"},
+        maxInboundMessageSize: 8 * 1024 * 1024
+    }
+};
+```
 
-1. Download and install Java SE Development Kit (JDK) version 21. You can download it from either of the following sources:
+## Publish platform events
 
-    * [Oracle JDK](https://www.oracle.com/java/technologies/downloads/)
-    * [OpenJDK](https://adoptium.net/)
+Each Publisher is bound to one topic. `publish` returns a result for each input when Salesforce returns a definitive result set. Local Avro failures and Salesforce item failures remain item-level errors. If a Publish response is lost or otherwise uncertain, the connector returns a request-level `ambiguous Publish outcome` error with `topic` and `eventIds` detail for the events included in that one RPC; it never republishes automatically.
 
-   > **Note:** After installation, remember to set the `JAVA_HOME` environment variable to the directory where JDK was installed.
+```ballerina
+pubsub:Publisher orders = check new ({connection, topic: "/event/Order_Notification__e"});
+pubsub:PublishResult[] results = check orders->publish([
+    {payload: {
+        CreatedDate: 0,
+        CreatedById: "",
+        Order_Id__c: "ORDER-1042",
+        Status__c: "SHIPPED"
+    }}
+]);
+```
 
-2. Download and install [Ballerina Swan Lake](https://ballerina.io/).
+The Publisher looks up current topic metadata before each batch, retrieves its writer schema through the process-wide tenant/schema cache, and generates missing correlation IDs.
+Payload fields must satisfy the topic's current Avro writer schema. In this
+example, `CreatedDate` and `CreatedById` are non-nullable fields in the sandbox
+event schema.
 
-3. Download and install [Docker](https://www.docker.com/get-started).
+A batch is split across more than one `Publish` RPC once it exceeds
+`targetRequestSizeBytes` (a soft 3 MB target by default); each chunk is
+attempted independently, so one ambiguous chunk never stops the others from
+being tried. If a chunk's RPC ends without a definitive response, that
+chunk's event IDs come back on the request-level `ambiguous Publish outcome`
+error, but `definitiveResults` on that same error still carries every result
+already obtained from other, unaffected chunks -- so a large multi-chunk
+batch never silently loses successful siblings because one chunk was
+ambiguous. A batch is never automatically resubmitted; the caller decides
+whether to retry the reported IDs. Salesforce's own 1 MB/event and 4 MB/request
+limits are not independently re-checked locally -- an oversized event or
+request surfaces as Salesforce's own item-level or request-level failure.
 
-   > **Note**: Ensure that the Docker daemon is running before executing any tests.
+## Consume events
 
-4. Export Github Personal access token with read package permissions as follows,
+Attach one service per canonical topic path to a Listener. Topic delivery is sequential: handler success → exact replay checkpoint → replacement credit. The default in-memory checkpoint store lasts only for the process lifetime.
 
-    ```bash
-    export packageUser=<Username>
-    export packagePAT=<Personal access token>
-    ```
+```ballerina
+pubsub:Listener events = check new ({connection});
+pubsub:Service handler = service object {
+    remote function onEvent(pubsub:Event event) returns error? {
+        // Process event.payload. Return an error to retry this event in place.
+    }
+};
+check events.attach(handler, "/event/Order_Notification__e");
+check events.'start();
+```
 
-### Build options
+Without a checkpoint, a topic starts at `LATEST`. An expired checkpoint recovers from `EARLIEST` by default. Because an application side effect and checkpoint save are not atomic, an event can be redelivered after a crash; consumers must make side effects idempotent. The default buffer size is 10, and outstanding protocol request credit never exceeds Salesforce's own maximum of 100.
 
-Execute the commands below to build from the source.
+A Listener may have several topics attached, each with its own independent stream, cursor, and delivery progress -- a slow handler on one topic never blocks another's progress. However, failure handling is listener-wide, not per-topic: once one topic exhausts its retry budget or hits a terminal (non-retryable) error, the whole Listener stops every attached topic's stream, not just the failing one. A service may optionally define `remote function onError(pubsub:ListenerError err) returns error?`; the Listener invokes it on every attached service that defines it (a service with only `onEvent` remains valid) before it finishes stopping. `getLastError()` returns the terminal diagnostic afterward, including which topic and operation failed. See the [multi-topic example](examples/multi-topic) for both an `onError`-aware and a plain `onEvent`-only service attached side by side.
 
-1. To build the package:
+The connector never exits the application process on any failure, including retry exhaustion or a terminal Listener error; it only stops its own streams. Restarting the process, supervising the Listener, and deciding whether/when to restart it (for example under Kubernetes pod replacement) are all the application's responsibility, not the connector's. Restarting with the default `InMemoryReplayStore` starts every topic without its prior checkpoint (`LATEST`, or `CUSTOM` only if you seed one), since that store's state does not survive the process; supply a durable `ReplayStore` implementation if a restart must resume from the last saved position.
 
-   ```bash
-   ./gradlew clean build
-   ```
+## Consume Change Data Capture events
 
-2. To run the tests:
+For `/data/*` topics, the Listener normalizes Salesforce `ChangeEventHeader`
+bitmaps before it invokes `onEvent`. The body has `changedData` and `metadata`
+fields: `changedData` contains changed values, including explicit nulls, while
+metadata retains the header and exposes `changedFields`, `nulledFields`, and
+`diffFields` as field names. Standard platform and real-time event payloads
+remain dynamic Avro-decoded `Payload` values. See the [CDC listener
+example](examples/cdc) for a starting point.
 
-   ```bash
-   ./gradlew clean test
-   ```
+## Build and test
 
-3. To build the without the tests:
+Run deterministic package tests without Salesforce credentials:
 
-   ```bash
-   ./gradlew clean build -x test
-   ```
+```bash
+cd ballerina
+bal test
+```
 
-4. To run tests against different environments:
+The suite starts a self-signed TLS Pub/Sub fixture on `localhost:19091` to
+exercise generated unary and streaming gRPC transport. Ensure that port is
+available when running the suite.
 
-   ```bash
-   ./gradlew clean test -Pgroups=<Comma separated groups/test cases>
-   ```
+The repository Gradle build uses Docker for Ballerina packaging:
 
-5. To debug the package with a remote debugger:
+```bash
+./gradlew build
+```
 
-   ```bash
-   ./gradlew clean build -Pdebug=<port>
-   ```
+### Shared-org sandbox tests
 
-6. To debug with the Ballerina language:
+Sandbox tests are disabled by default. Copy
+`ballerina/tests/Config.toml.example` to `ballerina/tests/Config.toml` and fill
+in `EP_URL`, `ACCESS_TOKEN`, `CLIENT_ID`, `CLIENT_SECRET`, `REFRESH_URL`,
+`SF_USERNAME`, `SF_PASSWORD`, and `PUBSUB_TENANT_ID` through the corresponding
+`sandbox*` values. `Config.toml` is gitignored and must never be committed.
+Run the non-destructive authentication and platform-event checks with
+`bal test --groups sandbox` from `ballerina`. The suite uses unique correlation
+IDs; platform events are intentionally not deleted. Account CDC lifecycle
+coverage remains in the separate `sandbox-cdc` group because it creates and
+deletes one Account.
 
-   ```bash
-   ./gradlew clean build -PbalJavaDebug=<port>
-   ```
-
-7. Publish the generated artifacts to the local Ballerina Central repository:
-
-    ```bash
-    ./gradlew clean build -PpublishToLocalCentral=true
-    ```
-
-8. Publish the generated artifacts to the Ballerina Central repository:
-
-   ```bash
-   ./gradlew clean build -PpublishToCentral=true
-   ```
-
-## Contribute to Ballerina
-
-As an open-source project, Ballerina welcomes contributions from the community.
-
-For more information, go to the [contribution guidelines](https://github.com/ballerina-platform/ballerina-lang/blob/master/CONTRIBUTING.md).
-
-## Code of conduct
-
-All the contributors are encouraged to read the [Ballerina Code of Conduct](https://ballerina.io/code-of-conduct).
-
-## Useful links
-
-* For more information go to the [`salesforce.pubsub` package](https://central.ballerina.io/ballerinax/salesforce.pubsub/latest).
-* For example demonstrations of the usage, go to [Ballerina By Examples](https://ballerina.io/learn/by-example/).
-* Chat live with us via our [Discord server](https://discord.gg/ballerinalang).
-* Post all technical questions on Stack Overflow with the [#ballerina](https://stackoverflow.com/questions/tagged/ballerina) tag.
+See [examples](examples/README.md) for standalone publish and listener source.
