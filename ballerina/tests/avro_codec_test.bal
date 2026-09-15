@@ -89,3 +89,32 @@ function testAvroCodecRoundTripsArrayNestedInsideRecord() returns error? {
     map<anydata> header = check decoded["header"].ensureType();
     test:assertEquals(header["changedFields"], ["Name", "Phone"]);
 }
+
+// The CDC test above only proves one specific field layout (one level of
+// nesting, a string array). This proves the same normalizePayloadForAvro
+// recursion generally: two levels of nesting, and a non-string (int) array,
+// neither of which CDC's own shape happens to exercise.
+@test:Config {}
+function testAvroCodecRoundTripsArrayNestedTwoRecordsDeep() returns error? {
+    string schema = "{\"type\":\"record\",\"name\":\"Outer\",\"fields\":[" +
+        "{\"name\":\"middle\",\"type\":{\"type\":\"record\",\"name\":\"Middle\",\"fields\":[" +
+        "{\"name\":\"inner\",\"type\":{\"type\":\"record\",\"name\":\"Inner\",\"fields\":[" +
+        "{\"name\":\"numbers\",\"type\":{\"type\":\"array\",\"items\":\"int\"}}]}}]}}]}";
+    byte[] bytes = check encodePayload(schema, {"middle": {"inner": {"numbers": [1, 2, 3]}}});
+    Payload decoded = check decodePayload(schema, bytes);
+    map<anydata> middle = check decoded["middle"].ensureType();
+    map<anydata> inner = check middle["inner"].ensureType();
+    test:assertEquals(inner["numbers"], [1, 2, 3]);
+}
+
+// This is about our own wrapper's contract, not ballerina/avro's parsing: a
+// completely invalid byte sequence must come back as an ordinary connector
+// error from decodePayload, not a panic or an unhandled native exception.
+@test:Config {}
+function testAvroCodecDecodeReturnsCleanErrorForMalformedBytes() {
+    string schema = "{\"type\":\"record\",\"name\":\"Order\",\"fields\":[{\"name\":\"Order_Id__c\",\"type\":\"string\"}]}";
+    byte[] garbage = [255, 255, 255, 255, 255, 255, 255, 255, 255, 255];
+
+    Payload|error decoded = decodePayload(schema, garbage);
+    test:assertTrue(decoded is error);
+}

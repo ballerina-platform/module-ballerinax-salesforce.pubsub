@@ -33,6 +33,12 @@ final string FIXTURE_INVALID_CDC_SCHEMA = "{\"type\":\"record\",\"name\":\"Fixtu
     "{\"name\":\"oversized\",\"type\":{\"type\":\"fixed\",\"name\":\"Oversized\",\"size\":10000}}]}";
 final string FIXTURE_SCHEMA_ID = "fixture-schema";
 final string FIXTURE_SCHEMA = "{\"type\":\"record\",\"name\":\"Fixture\",\"fields\":[{\"name\":\"Message__c\",\"type\":\"string\"}]}";
+// An "evolved" writer schema: an event encoded against this one carries a
+// field the original FIXTURE_SCHEMA never had.
+final string FIXTURE_SCHEMA_V2_ID = "fixture-schema-v2";
+final string FIXTURE_SCHEMA_V2 = "{\"type\":\"record\",\"name\":\"FixtureV2\",\"fields\":[" +
+    "{\"name\":\"Message__c\",\"type\":\"string\"},{\"name\":\"Extra__c\",\"type\":[\"null\",\"string\"],\"default\":null}]}";
+final string FIXTURE_SCHEMA_EVOLUTION_TOPIC = "/event/FixtureSchemaEvolution__e";
 final string FIXTURE_CDC_SCHEMA_ID = "fixture-cdc-schema";
 final string FIXTURE_CDC_SCHEMA = "{\"type\":\"record\",\"name\":\"AccountChangeEvent\",\"fields\":[" +
     "{\"name\":\"ChangeEventHeader\",\"type\":{\"type\":\"record\",\"name\":\"ChangeEventHeader\",\"fields\":[" +
@@ -47,7 +53,7 @@ final string[] FIXTURE_TOPICS = [
     FIXTURE_PERMISSION_DENIED_TOPIC, FIXTURE_REPLAY_RECOVERY_TOPIC, FIXTURE_STUCK_TOPIC,
     FIXTURE_MULTI_CHUNK_TOPIC, FIXTURE_AMBIGUOUS_CHUNK_TOPIC, FIXTURE_ALWAYS_AMBIGUOUS_TOPIC,
     FIXTURE_MALFORMED_CDC_TOPIC, FIXTURE_FLOW_CONTROL_TOPIC, FIXTURE_CDC_EVENTS_TOPIC,
-    FIXTURE_INVALID_CDC_SCHEMA_TOPIC
+    FIXTURE_INVALID_CDC_SCHEMA_TOPIC, FIXTURE_SCHEMA_EVOLUTION_TOPIC
 ];
 
 isolated int fixtureReconnectTopicAttempts = 0;
@@ -299,6 +305,9 @@ service "PubSub" on fixtureListener {
             // CDC bitmap in an otherwise-correct decode.
             return {schema_json: FIXTURE_INVALID_CDC_SCHEMA, schema_id: FIXTURE_INVALID_CDC_SCHEMA_ID};
         }
+        if request.schema_id == FIXTURE_SCHEMA_V2_ID {
+            return {schema_json: FIXTURE_SCHEMA_V2, schema_id: FIXTURE_SCHEMA_V2_ID};
+        }
         if request.schema_id != FIXTURE_SCHEMA_ID {
             return error("unexpected schema request");
         }
@@ -459,6 +468,22 @@ service "PubSub" on fixtureListener {
                 }]
             };
             return new stream<wire:FetchResponse, error?>(new FixtureOneResponseThenIdleStream(invalidSchemaResponse));
+        }
+        if first.value.topic_name == FIXTURE_SCHEMA_EVOLUTION_TOPIC {
+            // Two events in the same batch, each encoded against and tagged
+            // with its own distinct schema ID -- proving the connector
+            // resolves and decodes every event with the schema recorded on
+            // that event specifically, not whichever schema was resolved
+            // first for the batch/topic.
+            byte[] oldPayload = check encodePayload(FIXTURE_SCHEMA, {"Message__c": "old-shape"});
+            byte[] newPayload = check encodePayload(FIXTURE_SCHEMA_V2, {"Message__c": "new-shape", "Extra__c": "added-field"});
+            wire:FetchResponse evolutionResponse = {
+                events: [
+                    {event: {id: "evolution-old", schema_id: FIXTURE_SCHEMA_ID, payload: oldPayload}, replay_id: [1]},
+                    {event: {id: "evolution-new", schema_id: FIXTURE_SCHEMA_V2_ID, payload: newPayload}, replay_id: [2]}
+                ]
+            };
+            return new stream<wire:FetchResponse, error?>(new FixtureOneResponseThenIdleStream(evolutionResponse));
         }
         if first.value.topic_name == FIXTURE_MULTI_EVENT_TOPIC {
             wire:ConsumerEvent[] events = [];
@@ -850,6 +875,29 @@ isolated service class FixtureCdcRecorderService {
     }
 }
 
+// Records "<Message__c>:<Extra__c or <absent>>" for every delivered event, so
+// a schema-evolution test can confirm each event decoded with its own
+// envelope schema rather than, say, the batch's first-resolved schema.
+isolated service class FixtureSchemaEvolutionRecorderService {
+    *Service;
+    private string[] recordedDeliveries = [];
+
+    remote function onEvent(Event event) returns error? {
+        string message = <string>event.payload["Message__c"];
+        anydata? extra = event.payload["Extra__c"];
+        string entry = message + ":" + (extra is string ? extra : "<absent>");
+        lock {
+            self.recordedDeliveries.push(entry);
+        }
+    }
+
+    isolated function deliveries() returns string[] {
+        lock {
+            return self.recordedDeliveries.clone();
+        }
+    }
+}
+
 isolated service class FixtureErrorAwareService {
     *Service;
     private boolean notified = false;
@@ -1143,6 +1191,33 @@ function testListenerNormalizesCreateUpdateDeleteChangeEventsOverTheWire() retur
     check endpoint.immediateStop();
 
     test:assertEquals(handler.deliveries(), ["CREATE:Acme Inc", "UPDATE:Acme International", "DELETE:<absent>"]);
+}
+
+// This fails if the connector resolves/decodes a batch's events using
+// whichever writer schema was fetched first, instead of each event's own
+// recorded schema ID -- the actual behavior schema evolution depends on. Two
+// events land in the same FetchResponse, encoded against two different
+// schema versions and each tagged with its own distinct schema ID.
+@test:Config {}
+function testListenerDecodesEachEventWithItsOwnRecordedSchema() returns error? {
+    InMemoryReplayStore replayStore = new;
+    Listener endpoint = check new ({
+        connection: {
+            auth: <http:BearerTokenConfig>{token: "fixture-token"},
+            instanceUrl: "https://fixture.my.salesforce.com",
+            tenantId: "00DFixture000001",
+            endpoint: "https://localhost:" + FIXTURE_PORT.toString(),
+            grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
+        },
+        replayStore
+    });
+    FixtureSchemaEvolutionRecorderService handler = new;
+    check endpoint.attach(handler, FIXTURE_SCHEMA_EVOLUTION_TOPIC);
+    check endpoint.'start();
+    runtime:sleep(0.3);
+    check endpoint.immediateStop();
+
+    test:assertEquals(handler.deliveries(), ["old-shape:<absent>", "new-shape:added-field"]);
 }
 
 // This fails if Salesforce rejecting a stored replay cursor as invalid or
