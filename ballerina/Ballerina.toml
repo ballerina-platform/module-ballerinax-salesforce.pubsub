@@ -5,7 +5,7 @@ name = "salesforce.pubsub"
 version = "0.1.0"
 license = ["Apache-2.0"]
 authors = ["Ballerina"]
-keywords = []
+keywords = ["Cost/Freemium", "Vendor/Salesforce", "Area/CRM & Sales", "Type/Connector"]
 # icon = "icon.png" # TODO: update icon.png
 repository = "https://github.com/ballerina-platform/module-ballerinax-salesforce.pubsub"
 
