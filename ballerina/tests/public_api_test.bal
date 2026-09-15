@@ -1,3 +1,4 @@
+import ballerina/http;
 import ballerina/test;
 
 // This fails if default subscription behavior starts from an earlier replay
@@ -6,10 +7,24 @@ import ballerina/test;
 function testSubscriptionConfigHasSafeV1Defaults() {
     SubscriptionConfig config = {};
 
-    test:assertEquals(config.logicalSubscriptionName, "default");
     test:assertEquals(config.initialReplay, LATEST);
     test:assertEquals(config.expiredReplayRecovery, EARLIEST);
     test:assertEquals(config.bufferSize, 10);
+}
+
+// This fails if a Listener's shared subscriber identity silently changes,
+// which would move every attached topic's checkpoint to a new key on restart.
+@test:Config {}
+function testListenerConfigDefaultsLogicalSubscriptionName() {
+    ListenerConfig config = {
+        connection: {
+            auth: <http:BearerTokenConfig>{token: "ignored-in-test"},
+            instanceUrl: "https://acme.my.salesforce.com",
+            tenantId: "00D000000000001"
+        }
+    };
+
+    test:assertEquals(config.logicalSubscriptionName, "default");
 }
 
 // This fails if public events lose duplicate binary headers or require an event

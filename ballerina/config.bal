@@ -2,43 +2,36 @@
 //
 // WSO2 LLC. licenses this file to you under the Apache License, Version 2.0.
 
-# Resolves one topic's delivery configuration. The service path remains the
-# authoritative topic; an override only supplies delivery settings for it.
+# Resolves one attached service's effective delivery configuration. Presence of
+# a @ServiceConfig annotation on the service replaces the listener's
+# subscriptionConfig wholesale for that topic; absence falls back to
+# subscriptionConfig.
 #
 # + config - listener-wide configuration
-# + topic - canonical attached service-path topic
+# + attachedService - the service value passed to Listener.attach()
 # + return - effective topic delivery configuration
-public isolated function subscriptionConfigFor(ListenerConfig config, string topic) returns SubscriptionConfig|error {
-    if topic.length() == 0 {
-        return error("topic must not be empty");
-    }
-    SubscriptionConfig? override = config.topicOverrides[topic];
-    if override is SubscriptionConfig {
-        return override;
-    }
-    return config.subscriptionDefaults;
+public isolated function subscriptionConfigFor(ListenerConfig config, Service attachedService) returns SubscriptionConfig {
+    typedesc<Service> serviceType = typeof attachedService;
+    SubscriptionConfig? override = serviceType.@ServiceConfig;
+    return override ?: config.subscriptionConfig;
 }
 
 # Validates Listener configuration before a service is attached or transport is
-# created. Topic overrides may change only delivery settings, never identity.
+# created. A per-service @ServiceConfig annotation override is validated
+# separately in Listener.attach(), since it can only be discovered once a
+# service value is presented there.
 #
 # + config - listener configuration to validate
 # + return - an error when a connection or delivery setting is invalid
 isolated function validateListenerConfig(ListenerConfig config) returns error? {
     check validateConnectionConfig(config.connection);
-    check validateSubscriptionConfig(config.subscriptionDefaults);
-    foreach var [topic, subscription] in config.topicOverrides.entries() {
-        if topic.length() == 0 {
-            return error("topic override key must not be empty");
-        }
-        check validateSubscriptionConfig(subscription);
-    }
-}
-
-isolated function validateSubscriptionConfig(SubscriptionConfig config) returns error? {
     if config.logicalSubscriptionName.length() == 0 {
         return error("logicalSubscriptionName must not be empty");
     }
+    check validateSubscriptionConfig(config.subscriptionConfig);
+}
+
+isolated function validateSubscriptionConfig(SubscriptionConfig config) returns error? {
     if config.bufferSize <= 0 {
         return error("bufferSize must be greater than zero");
     }

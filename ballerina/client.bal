@@ -103,12 +103,15 @@ public class Listener {
     #
     # + s - service with a remote `onEvent` method
     # + name - canonical Salesforce topic path
-    # + return - an error for an invalid or duplicate topic
+    # + return - an error for an invalid or duplicate topic, or an invalid
+    #   effective subscription configuration, including one supplied by a
+    #   @ServiceConfig annotation
     public function attach(Service s, string[]|string? name = ()) returns error? {
         if name !is string || name.length() == 0 {
             return error("Listener service path must be one canonical topic string");
         }
-        _ = check subscriptionConfigFor(self.config, name);
+        SubscriptionConfig resolvedConfig = subscriptionConfigFor(self.config, s);
+        check validateSubscriptionConfig(resolvedConfig);
         if self.services.hasKey(name) {
             return error("a service is already attached for topic " + name);
         }
@@ -216,13 +219,13 @@ public class Listener {
         if !topicInfo.can_subscribe {
             return error("topic does not support subscribing");
         }
-        SubscriptionConfig subscriptionConfig = check subscriptionConfigFor(self.config, topic);
+        SubscriptionConfig resolvedConfig = subscriptionConfigFor(self.config, attachedService);
         ReplayKey replayKey = {
             tenantId: self.config.connection.tenantId,
             topic,
-            subscriptionName: subscriptionConfig.logicalSubscriptionName
+            subscriptionName: self.config.logicalSubscriptionName
         };
-        FlowController flow = check new (subscriptionConfig.bufferSize);
+        FlowController flow = check new (resolvedConfig.bufferSize);
         int initialCredit = check flow.initialRequest();
         wire:SubscribeStreamingClient streamClient = check grpcClient->SubscribeContext(headers);
         wire:FetchRequest fetchRequest;
@@ -230,10 +233,10 @@ public class Listener {
             fetchRequest = check recoveryFetchRequest(topic, forcedRecoveryPosition, initialCredit);
         } else {
             byte[]? replayId = check self.config.replayStore.load(replayKey);
-            fetchRequest = check initialFetchRequest(topic, replayId, subscriptionConfig.initialReplay, initialCredit);
+            fetchRequest = check initialFetchRequest(topic, replayId, resolvedConfig.initialReplay, initialCredit);
         }
         check streamClient->sendFetchRequest(fetchRequest);
-        self.subscriptions[topic] = {streamClient, flow, gate: new, replayKey, config: subscriptionConfig, attachedService};
+        self.subscriptions[topic] = {streamClient, flow, gate: new, replayKey, config: resolvedConfig, attachedService};
     }
 
     // Recreates only a closed topic stream. Each reconnect reloads the latest

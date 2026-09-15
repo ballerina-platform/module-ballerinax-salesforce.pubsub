@@ -626,7 +626,7 @@ function testListenerUsesLocalTlsGrpcFixture() returns error? {
             grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
         },
         replayStore,
-        subscriptionDefaults: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
+        subscriptionConfig: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
     });
     Service handler = service object {
         remote function onEvent(Event event) returns error? {
@@ -666,7 +666,7 @@ function testListenerGracefulStopBoundsWaitOnAnIdleStream() returns error? {
             grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
         },
         replayStore,
-        subscriptionDefaults: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
+        subscriptionConfig: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
     });
     Service handler = service object {
         remote function onEvent(Event event) returns error? {
@@ -699,7 +699,7 @@ function testListenerBoundsWireCreditAcrossMultipleReplenishmentRoundTrips() ret
             grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
         },
         replayStore,
-        subscriptionDefaults: {bufferSize: FIXTURE_FLOW_CONTROL_BUFFER_SIZE, reconnectRetry: {maxRetries: 0}}
+        subscriptionConfig: {bufferSize: FIXTURE_FLOW_CONTROL_BUFFER_SIZE, reconnectRetry: {maxRetries: 0}}
     });
     FixtureFailingAtService handler = new ("never-fails");
     check endpoint.attach(handler, FIXTURE_FLOW_CONTROL_TOPIC);
@@ -726,7 +726,7 @@ function testListenerReconnectsAndResumesDeliveryAfterStreamClosure() returns er
             grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
         },
         replayStore,
-        subscriptionDefaults: {
+        subscriptionConfig: {
             handlerRetry: {maxRetries: 0},
             reconnectRetry: {maxRetries: 1, initialDelay: 0.05, maxDelay: 0.05}
         }
@@ -888,7 +888,7 @@ function testListenerNotifiesOnErrorAndRecordsTerminalFailureOnStreamError() ret
             grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
         },
         replayStore,
-        subscriptionDefaults: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
+        subscriptionConfig: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
     });
     FixtureErrorAwareService handler = new;
     check endpoint.attach(handler, FIXTURE_ERROR_TOPIC);
@@ -919,7 +919,7 @@ function testListenerHandlerFailureMidBatchHoldsLaterEventsAndChecksAtLastGood()
             grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
         },
         replayStore,
-        subscriptionDefaults: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
+        subscriptionConfig: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
     });
     FixtureFailingAtService handler = new ("event-7");
     check endpoint.attach(handler, FIXTURE_MULTI_EVENT_TOPIC);
@@ -957,7 +957,7 @@ function testListenerRedeliversEventAfterCheckpointSaveFailure() returns error? 
     Listener firstEndpoint = check new ({
         connection,
         replayStore,
-        subscriptionDefaults: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
+        subscriptionConfig: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
     });
     FixtureCountingService firstHandler = new;
     check firstEndpoint.attach(firstHandler, FIXTURE_TOPIC);
@@ -975,7 +975,7 @@ function testListenerRedeliversEventAfterCheckpointSaveFailure() returns error? 
     Listener secondEndpoint = check new ({
         connection,
         replayStore,
-        subscriptionDefaults: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
+        subscriptionConfig: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
     });
     FixtureCountingService secondHandler = new;
     check secondEndpoint.attach(secondHandler, FIXTURE_TOPIC);
@@ -1001,7 +1001,7 @@ function testListenerTreatsPermissionDeniedAsTerminalWithoutRetry() returns erro
             grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
         },
         replayStore,
-        subscriptionDefaults: {
+        subscriptionConfig: {
             handlerRetry: {maxRetries: 0},
             reconnectRetry: {maxRetries: 3, initialDelay: 0.05, maxDelay: 0.05}
         }
@@ -1040,7 +1040,7 @@ function testListenerStopsAfterMalformedCdcEventFailsNormalization() returns err
             grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
         },
         replayStore,
-        subscriptionDefaults: {handlerRetry: {maxRetries: 3}, reconnectRetry: {maxRetries: 0}}
+        subscriptionConfig: {handlerRetry: {maxRetries: 3}, reconnectRetry: {maxRetries: 0}}
     });
     FixtureCountingService handler = new;
     check endpoint.attach(handler, FIXTURE_MALFORMED_CDC_TOPIC);
@@ -1072,7 +1072,7 @@ function testListenerStopsAllTopicsWhenCdcNormalizationFailsOnOneTopic() returns
             grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
         },
         replayStore,
-        subscriptionDefaults: {reconnectRetry: {maxRetries: 0}}
+        subscriptionConfig: {reconnectRetry: {maxRetries: 0}}
     });
     Service healthyHandler = service object {
         remote function onEvent(Event event) returns error? {
@@ -1108,7 +1108,7 @@ function testListenerTreatsMismatchedCdcWriterSchemaAsTerminal() returns error? 
             grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
         },
         replayStore,
-        subscriptionDefaults: {reconnectRetry: {maxRetries: 0}}
+        subscriptionConfig: {reconnectRetry: {maxRetries: 0}}
     });
     FixtureCountingService handler = new;
     check endpoint.attach(handler, FIXTURE_INVALID_CDC_SCHEMA_TOPIC);
@@ -1169,7 +1169,7 @@ function testListenerRecoversFromRejectedReplayUsingConfiguredPolicy() returns e
             grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
         },
         replayStore,
-        subscriptionDefaults: {
+        subscriptionConfig: {
             handlerRetry: {maxRetries: 0},
             reconnectRetry: {maxRetries: 1, initialDelay: 0.05, maxDelay: 0.05},
             expiredReplayRecovery: EARLIEST
@@ -1202,7 +1202,7 @@ function testListenerStopsAllTopicsWhenOneFailsTerminally() returns error? {
             grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
         },
         replayStore,
-        subscriptionDefaults: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
+        subscriptionConfig: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
     });
     // FIXTURE_TOPIC's stream stays open (healthy); FIXTURE_ERROR_TOPIC fails
     // immediately and must take the whole Listener down with it. (Not
@@ -1326,7 +1326,7 @@ function testListenerRepeatedStopIsIdempotent() returns error? {
             grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
         },
         replayStore,
-        subscriptionDefaults: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
+        subscriptionConfig: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
     });
     Service handler = service object {
         remote function onEvent(Event event) returns error? {

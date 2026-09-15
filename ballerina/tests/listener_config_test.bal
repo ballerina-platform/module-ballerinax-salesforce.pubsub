@@ -9,25 +9,41 @@ function newOrderService() returns Service {
     return handler;
 }
 
-// This fails if a configured topic override is ignored, causing a service to
+// This fails if a @ServiceConfig annotation is ignored, causing a service to
 // use listener defaults instead of its own replay and flow-control policy.
 @test:Config {}
-function testListenerConfigAppliesTopicOverride() returns error? {
+function testListenerConfigAppliesServiceConfigAnnotation() {
     ListenerConfig config = {
         connection: {
             auth: <http:BearerTokenConfig>{token: "ignored-in-test"},
             instanceUrl: "https://acme.my.salesforce.com",
             tenantId: "00D000000000001"
         },
-        subscriptionDefaults: {bufferSize: 10},
-        topicOverrides: {
-            "/event/Order__e": {logicalSubscriptionName: "orders", bufferSize: 20}
+        subscriptionConfig: {bufferSize: 10}
+    };
+    Service annotatedService = @ServiceConfig {bufferSize: 20} service object {
+        remote function onEvent(Event event) returns error? {
         }
     };
 
-    SubscriptionConfig subscription = check subscriptionConfigFor(config, "/event/Order__e");
-    test:assertEquals(subscription.logicalSubscriptionName, "orders");
+    SubscriptionConfig subscription = subscriptionConfigFor(config, annotatedService);
     test:assertEquals(subscription.bufferSize, 20);
+}
+
+// Listener construction must reject an empty listener-wide subscription
+// identity before it owns a transport or opens a Subscribe stream.
+@test:Config {}
+function testListenerConfigRejectsEmptyLogicalSubscriptionName() {
+    ListenerConfig config = {
+        connection: {
+            auth: <http:BearerTokenConfig>{token: "ignored-in-test"},
+            instanceUrl: "https://acme.my.salesforce.com",
+            tenantId: "00D000000000001"
+        },
+        logicalSubscriptionName: ""
+    };
+
+    test:assertTrue(validateListenerConfig(config) is error);
 }
 
 // Listener construction must reject invalid topic-scoped controls before it
@@ -40,7 +56,7 @@ function testListenerConfigRejectsInvalidDeliverySettings() {
             instanceUrl: "https://acme.my.salesforce.com",
             tenantId: "00D000000000001"
         },
-        subscriptionDefaults: {logicalSubscriptionName: "", bufferSize: 0}
+        subscriptionConfig: {bufferSize: 0}
     };
 
     test:assertTrue(validateListenerConfig(config) is error);

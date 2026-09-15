@@ -79,10 +79,11 @@ public type RetryPolicy record {|
     decimal maxDelay = 30;
 |};
 
-# Topic-scoped sequential delivery configuration.
+# Topic-scoped sequential delivery configuration. Attach as `@pubsub:ServiceConfig`
+# on a service declaration to override `ListenerConfig.subscriptionConfig` for
+# that topic. An override replaces the whole record: any field the annotation
+# omits takes this type's own default, not `subscriptionConfig`'s value.
 public type SubscriptionConfig record {|
-    # Name that distinguishes independent cursors for this topic.
-    string logicalSubscriptionName = "default";
     # Position used when no checkpoint exists.
     ReplayPosition initialReplay = LATEST;
     # Position used when Salesforce rejects an expired checkpoint.
@@ -114,10 +115,15 @@ public type PublisherConfig record {|
 public type ListenerConfig record {|
     # Shared authenticated transport configuration.
     ConnectionConfig connection;
-    # Defaults applied to topics without a matching topic override.
-    SubscriptionConfig subscriptionDefaults = {};
-    # Topic-specific delivery settings keyed by canonical service-path topic.
-    map<SubscriptionConfig> topicOverrides = {};
+    # Name that distinguishes independent consumer applications/processes that
+    # may share a durable replay store. Shared by every topic this Listener
+    # subscribes to; a Listener already rejects two of its own services sharing
+    # one topic, so `{tenantId, topic, logicalSubscriptionName}` stays unique
+    # per topic without a per-topic value.
+    string logicalSubscriptionName = "default";
+    # Defaults applied to a topic whose service carries no @ServiceConfig
+    # annotation.
+    SubscriptionConfig subscriptionConfig = {};
     # Cursor store shared by attached topic subscriptions. The default survives
     # only while this Listener process remains alive.
     ReplayStore replayStore = new InMemoryReplayStore();
@@ -129,6 +135,12 @@ public type ListenerConfig record {|
 public type Service service object {
     remote function onEvent(Event event) returns error?;
 };
+
+# Per-service override of `ListenerConfig.subscriptionConfig` for one attached
+# topic. Presence of this annotation replaces the entire effective
+# `SubscriptionConfig` for that topic; fields the annotation omits take
+# `SubscriptionConfig`'s own defaults, not `subscriptionConfig`'s values.
+public annotation SubscriptionConfig ServiceConfig on service;
 
 # Privacy-safe terminal listener failure context.
 public type ListenerError record {|
