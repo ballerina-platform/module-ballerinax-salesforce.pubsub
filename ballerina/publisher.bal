@@ -20,7 +20,10 @@ import ballerina/uuid;
 # Publishes a batch of events to one configured Salesforce topic. Transport
 # operations are added behind this topic-bound public abstraction.
 public isolated client class Publisher {
-    private final readonly & PublisherConfig config;
+    private final string topic;
+    private final int targetRequestSizeBytes;
+    private final readonly & ConnectionIdentity connection;
+    private final PubSubTokenManager tokenManager;
     private final pubsubApi:PubSubClient pubsubClient;
 
     # Creates a topic-bound Publisher after local validation.
@@ -29,7 +32,13 @@ public isolated client class Publisher {
     # + return - configuration error when the publisher cannot be constructed
     public isolated function init(PublisherConfig config) returns error? {
         check validatePublisherConfig(config);
-        self.config = config.cloneReadOnly();
+        self.topic = config.topic;
+        self.targetRequestSizeBytes = config.targetRequestSizeBytes;
+        self.connection = <readonly & ConnectionIdentity>{
+            instanceUrl: config.connection.instanceUrl,
+            tenantId: config.connection.tenantId
+        };
+        self.tokenManager = new (config.connection);
         self.pubsubClient = check new (config.connection.endpoint, grpcConfigFor(config.connection));
     }
 
@@ -37,9 +46,16 @@ public isolated client class Publisher {
     #
     # + return - current Salesforce topic metadata or a request-level error
     isolated remote function getTopic() returns pubsubApi:TopicInfo|error {
-        string accessToken = check accessTokenFor(self.config.connection);
-        map<string|string[]> headers = check metadataFor(self.config.connection, accessToken);
-        return self.pubsubClient->GetTopic({content: {topic_name: self.config.topic}, headers});
+        string accessToken = check self.tokenManager.getAccessToken();
+        map<string|string[]> headers = check metadataForIdentity(self.connection, accessToken);
+        pubsubApi:TopicInfo|error result = self.pubsubClient->GetTopic({content: {topic_name: self.topic}, headers});
+        if result is error && grpcStatusNameOf(result) == "UNAUTHENTICATED" {
+            check self.tokenManager.invalidateAccessToken();
+            string refreshedToken = check self.tokenManager.getAccessToken();
+            map<string|string[]> refreshedHeaders = check metadataForIdentity(self.connection, refreshedToken);
+            return self.pubsubClient->GetTopic({content: {topic_name: self.topic}, headers: refreshedHeaders});
+        }
+        return result;
     }
 
     # Publishes one batch to this Publisher's bound topic. A batch larger than
@@ -60,26 +76,34 @@ public isolated client class Publisher {
         }
         PublishEvent[] identifiedEvents = ensurePublishEventIds(events);
         check validateUniquePublishEventIds(identifiedEvents);
-        GrpcSchemaLoader schemaLoader = new (self.pubsubClient, self.config.connection);
-        string schemaJson = check processSchemaFor(self.config.connection.tenantId, topic.schema_id, schemaLoader);
+        GrpcSchemaLoader schemaLoader = new (self.pubsubClient, self.connection, self.tokenManager);
+        string schemaJson = check processSchemaFor(self.connection.tenantId, topic.schema_id, schemaLoader);
         PreparedPublishEvents prepared = prepareProducerEvents(schemaJson, topic.schema_id, identifiedEvents);
         if prepared.wireEvents.length() == 0 {
             return prepared.localFailures;
         }
-        pubsubApi:ProducerEvent[][] chunks = chunkProducerEvents(self.config.topic, prepared.wireEvents,
-            self.config.targetRequestSizeBytes);
-        string accessToken = check accessTokenFor(self.config.connection);
-        map<string|string[]> headers = check metadataFor(self.config.connection, accessToken);
+        pubsubApi:ProducerEvent[][] chunks = chunkProducerEvents(self.topic, prepared.wireEvents,
+            self.targetRequestSizeBytes);
 
         pubsubApi:PublishResult[] definitiveWireResults = [];
+        PublishResult[] rejectedChunkResults = [];
         string[] ambiguousEventIds = [];
         foreach pubsubApi:ProducerEvent[] chunk in chunks {
+            string accessToken = check self.tokenManager.getAccessToken();
+            map<string|string[]> headers = check metadataForIdentity(self.connection, accessToken);
             pubsubApi:PublishResponse|error outcome = self.pubsubClient->Publish({
-                content: {topic_name: self.config.topic, events: chunk}, headers
+                content: {topic_name: self.topic, events: chunk}, headers
             });
             if outcome is error {
-                foreach pubsubApi:ProducerEvent event in chunk {
-                    ambiguousEventIds.push(event.id);
+                if isAmbiguousPublishFailure(outcome) {
+                    foreach pubsubApi:ProducerEvent event in chunk {
+                        ambiguousEventIds.push(event.id);
+                    }
+                } else {
+                    error cause = outcome;
+                    foreach pubsubApi:ProducerEvent event in chunk {
+                        rejectedChunkResults.push({id: event.id, itemError: cause});
+                    }
                 }
             } else {
                 foreach pubsubApi:PublishResult wireResult in outcome.results {
@@ -87,13 +111,14 @@ public isolated client class Publisher {
                 }
             }
         }
+        PublishResult[] localFailures = [...prepared.localFailures, ...rejectedChunkResults];
         if ambiguousEventIds.length() > 0 {
             PublishResult[] definitiveResults = check definitiveResultsExcluding(identifiedEvents,
-                prepared.localFailures, definitiveWireResults, ambiguousEventIds);
-            return ambiguousPublishError(self.config.topic, ambiguousEventIds, definitiveResults,
+                localFailures, definitiveWireResults, ambiguousEventIds);
+            return ambiguousPublishError(self.topic, ambiguousEventIds, definitiveResults,
                 error("one or more Publish RPCs ended without a definitive response"));
         }
-        return mergePublisherResults(identifiedEvents, prepared.localFailures, definitiveWireResults);
+        return mergePublisherResults(identifiedEvents, localFailures, definitiveWireResults);
     }
 }
 
@@ -110,19 +135,29 @@ type PreparedPublishEvents record {|
 isolated class GrpcSchemaLoader {
     *SchemaLoader;
     private final pubsubApi:PubSubClient pubsubClient;
-    private final readonly & ConnectionConfig connection;
+    private final readonly & ConnectionIdentity connection;
+    private final PubSubTokenManager tokenManager;
 
-    isolated function init(pubsubApi:PubSubClient pubsubClient, ConnectionConfig connection) {
+    isolated function init(pubsubApi:PubSubClient pubsubClient, readonly & ConnectionIdentity connection,
+            PubSubTokenManager tokenManager) {
         self.pubsubClient = pubsubClient;
-        self.connection = connection.cloneReadOnly();
+        self.connection = connection;
+        self.tokenManager = tokenManager;
     }
 
     public isolated function load(string tenantId, string schemaId) returns string|error {
-        string accessToken = check accessTokenFor(self.connection);
-        map<string|string[]> headers = check metadataFor(self.connection, accessToken);
-        pubsubApi:SchemaInfo schema = check self.pubsubClient->GetSchema({
+        string accessToken = check self.tokenManager.getAccessToken();
+        map<string|string[]> headers = check metadataForIdentity(self.connection, accessToken);
+        pubsubApi:SchemaInfo|error result = self.pubsubClient->GetSchema({
             content: {schema_id: schemaId}, headers
         });
+        if result is error && grpcStatusNameOf(result) == "UNAUTHENTICATED" {
+            check self.tokenManager.invalidateAccessToken();
+            string refreshedToken = check self.tokenManager.getAccessToken();
+            map<string|string[]> refreshedHeaders = check metadataForIdentity(self.connection, refreshedToken);
+            result = self.pubsubClient->GetSchema({content: {schema_id: schemaId}, headers: refreshedHeaders});
+        }
+        pubsubApi:SchemaInfo schema = check result;
         return schema.schema_json;
     }
 }

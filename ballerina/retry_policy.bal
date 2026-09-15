@@ -103,6 +103,25 @@ isolated function isInvalidReplayError(error streamError) returns boolean {
     return streamError.message().toUpperAscii().includes("REPLAY");
 }
 
+# Classifies a Publish RPC failure as leaving the batch's outcome ambiguous.
+# A status Salesforce returns before accepting the request (an invalid
+# argument, or an authorization failure) is definitive: the batch was never
+# persisted. Any other status, including one with no gRPC status at all,
+# leaves it unknown whether Salesforce processed the request before the
+# failure, so it stays ambiguous.
+#
+# + cause - the Publish RPC failure
+# + return - false only for a status that rules out server-side acceptance
+public isolated function isAmbiguousPublishFailure(error cause) returns boolean {
+    string? status = grpcStatusNameOf(cause);
+    if status is () {
+        return true;
+    }
+    return status != "INVALID_ARGUMENT" && status != "UNAUTHENTICATED" && status != "PERMISSION_DENIED" &&
+        status != "NOT_FOUND" && status != "ALREADY_EXISTS" && status != "FAILED_PRECONDITION" &&
+        status != "OUT_OF_RANGE" && status != "UNIMPLEMENTED";
+}
+
 # Returns whether the configured retry budget has another retry after the
 # initial attempt. `retryNumber` is one-based.
 #

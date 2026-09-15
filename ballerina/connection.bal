@@ -15,10 +15,17 @@
 // under the License.
 
 import ballerinax/salesforce;
-import ballerina/http;
 import ballerina/grpc;
 
 final string DEFAULT_PUBSUB_ENDPOINT = "https://api.pubsub.salesforce.com:7443";
+
+type ConnectionIdentity record {|
+    string instanceUrl;
+    string tenantId;
+|};
+
+isolated function connectionIdentityFor(ConnectionConfig config) returns readonly & ConnectionIdentity =>
+    <readonly & ConnectionIdentity>{instanceUrl: config.instanceUrl, tenantId: config.tenantId};
 
 # Connection settings shared by Publishers and Listeners. Authentication uses
 # the existing Salesforce connector's public OAuth2 configuration union so the
@@ -26,6 +33,13 @@ final string DEFAULT_PUBSUB_ENDPOINT = "https://api.pubsub.salesforce.com:7443";
 public type ConnectionConfig record {| 
     # OAuth configuration shared with `ballerinax/salesforce`.
     salesforce:OAuth2Config auth;
+    # Token state used by renewable OAuth grants. The default is appropriate
+    # for one process; callers can supply a shared Salesforce TokenStore when
+    # rotated refresh tokens must survive restarts.
+    salesforce:TokenStore tokenStore = new salesforce:InMemoryTokenStore();
+    # Fallback Salesforce session lifetime in seconds when the token endpoint
+    # does not return an `expires_in` value.
+    int sessionTimeout = 900;
     # Salesforce instance URL included in Pub/Sub RPC metadata.
     string instanceUrl;
     # Salesforce tenant/org identifier included in Pub/Sub RPC metadata.
@@ -48,13 +62,18 @@ public type ConnectionConfig record {|
 # + return - Salesforce Pub/Sub RPC metadata
 isolated function metadataFor(ConnectionConfig config, string accessToken) returns map<string|string[]>|error {
     check validateConnectionConfig(config);
+    return metadataForIdentity({instanceUrl: config.instanceUrl, tenantId: config.tenantId}, accessToken);
+}
+
+isolated function metadataForIdentity(ConnectionIdentity connection, string accessToken)
+        returns map<string|string[]>|error {
     if accessToken.length() == 0 {
         return error("access token must not be empty");
     }
     return {
         accesstoken: accessToken,
-        instanceurl: config.instanceUrl,
-        tenantid: config.tenantId
+        instanceurl: connection.instanceUrl,
+        tenantid: connection.tenantId
     };
 }
 
@@ -75,6 +94,9 @@ isolated function validateConnectionConfig(ConnectionConfig config) returns erro
     if config.connectionTimeout <= 0.0d {
         return error("connectionTimeout must be greater than zero");
     }
+    if config.sessionTimeout <= 60 {
+        return error("sessionTimeout must be greater than 60 seconds");
+    }
 }
 
 // Produces the transport configuration used for every owned gRPC channel.
@@ -86,18 +108,10 @@ isolated function grpcConfigFor(ConnectionConfig config) returns grpc:ClientConf
     return transportConfig;
 }
 
-# Returns a current access token for a connection. Bearer tokens are immediately
-# usable; renewable grants require the Salesforce token-provider seam.
-#
-# + config - connection configuration
-# + return - access token or an error for a grant awaiting shared lifecycle support
+# Compatibility helper for package-internal callers. Publisher and Listener
+# retain a manager for their full lifecycle; do not use this helper for a
+# repeated RPC path because it intentionally creates a fresh manager.
 isolated function accessTokenFor(ConnectionConfig config) returns string|error {
-    salesforce:OAuth2Config auth = config.auth;
-    if auth is http:BearerTokenConfig {
-        if auth.token.length() == 0 {
-            return error("bearer token must not be empty");
-        }
-        return auth.token;
-    }
-    return error("renewable OAuth grants require the Salesforce OAuth2TokenProvider");
+    PubSubTokenManager manager = new (config);
+    return manager.getAccessToken();
 }

@@ -84,6 +84,7 @@ class ServiceErrorNotifier {
 # stream opening occur when the Listener starts.
 public class Listener {
     private final ListenerConfig config;
+    private final PubSubTokenManager tokenManager;
     private map<Service> services = {};
     private map<ActiveSubscription> subscriptions = {};
     private map<future<error?>> workers = {};
@@ -96,6 +97,7 @@ public class Listener {
     public function init(ListenerConfig config) returns error? {
         check validateListenerConfig(config);
         self.config = config;
+        self.tokenManager = new (config.connection);
     }
 
     # Registers a service for its canonical Salesforce topic. The compiler
@@ -213,9 +215,17 @@ public class Listener {
     // rejected the stored cursor as invalid or expired.
     private function openTopicSubscription(wire:PubSubClient grpcClient, string topic, Service attachedService,
             ReplayPosition? forcedRecoveryPosition = ()) returns error? {
-        string accessToken = check accessTokenFor(self.config.connection);
-        map<string|string[]> headers = check metadataFor(self.config.connection, accessToken);
-        wire:TopicInfo topicInfo = check grpcClient->GetTopic({content: {topic_name: topic}, headers});
+        string topicToken = check self.tokenManager.getAccessToken();
+        map<string|string[]> topicHeaders = check metadataForIdentity(connectionIdentityFor(self.config.connection), topicToken);
+        wire:TopicInfo|error topicResult = grpcClient->GetTopic({content: {topic_name: topic}, headers: topicHeaders});
+        if topicResult is error && grpcStatusNameOf(topicResult) == "UNAUTHENTICATED" {
+            check self.tokenManager.invalidateAccessToken();
+            string refreshedTopicToken = check self.tokenManager.getAccessToken();
+            map<string|string[]> refreshedTopicHeaders = check metadataForIdentity(
+                connectionIdentityFor(self.config.connection), refreshedTopicToken);
+            topicResult = grpcClient->GetTopic({content: {topic_name: topic}, headers: refreshedTopicHeaders});
+        }
+        wire:TopicInfo topicInfo = check topicResult;
         if !topicInfo.can_subscribe {
             return error("topic does not support subscribing");
         }
@@ -227,7 +237,17 @@ public class Listener {
         };
         FlowController flow = check new (resolvedConfig.bufferSize);
         int initialCredit = check flow.initialRequest();
-        wire:SubscribeStreamingClient streamClient = check grpcClient->SubscribeContext(headers);
+        string streamToken = check self.tokenManager.getAccessToken();
+        map<string|string[]> streamHeaders = check metadataForIdentity(connectionIdentityFor(self.config.connection), streamToken);
+        wire:SubscribeStreamingClient|error streamResult = grpcClient->SubscribeContext(streamHeaders);
+        if streamResult is error && grpcStatusNameOf(streamResult) == "UNAUTHENTICATED" {
+            check self.tokenManager.invalidateAccessToken();
+            string refreshedStreamToken = check self.tokenManager.getAccessToken();
+            map<string|string[]> refreshedStreamHeaders = check metadataForIdentity(
+                connectionIdentityFor(self.config.connection), refreshedStreamToken);
+            streamResult = grpcClient->SubscribeContext(refreshedStreamHeaders);
+        }
+        wire:SubscribeStreamingClient streamClient = check streamResult;
         wire:FetchRequest fetchRequest;
         if forcedRecoveryPosition is ReplayPosition {
             fetchRequest = check recoveryFetchRequest(topic, forcedRecoveryPosition, initialCredit);
@@ -334,7 +354,7 @@ public class Listener {
         if currentClient !is wire:PubSubClient {
             return error("listener transport is unavailable");
         }
-        GrpcSchemaLoader schemaLoader = new (currentClient, self.config.connection);
+        GrpcSchemaLoader schemaLoader = new (currentClient, connectionIdentityFor(self.config.connection), self.tokenManager);
         ServiceEventHandler handler = new (current.attachedService);
         wire:SubscribeStreamingClient streamClient = current.streamClient;
         while self.started {

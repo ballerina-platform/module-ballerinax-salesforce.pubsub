@@ -4,7 +4,12 @@
 
 ## Status
 
-This is an in-progress first-cut implementation. Bearer-token authentication, unary publishing, dynamic Avro envelopes, in-memory replay checkpoints, and topic-scoped sequential consumption are implemented and covered by local tests. Renewable OAuth grants require the public token-provider API being extracted from the sibling Salesforce connector; this dependency is tracked in `pubsub-implementation-task-list.md` in the parent workspace.
+This is an in-progress first-cut implementation. Bearer-token, refresh-token,
+client-credentials, and password-grant authentication are implemented inside
+this package, alongside unary publishing, dynamic Avro envelopes, in-memory
+replay checkpoints, and topic-scoped sequential consumption. Pub/Sub reuses
+the public Salesforce OAuth configuration and TokenStore contracts, but does
+not depend on the Salesforce connector's private CometD token manager.
 
 ## Configure a connection
 
@@ -22,6 +27,14 @@ pubsub:ConnectionConfig connection = {
 ```
 
 Do not commit access tokens, refresh tokens, or event payloads to source control. Use configurable values or deployment secret management instead.
+
+For a refresh-token grant, the connector retains the current access token and
+any Salesforce-rotated refresh token in `tokenStore`. The default is
+`salesforce:InMemoryTokenStore`, suitable for a single process. Supply a
+shared `salesforce:TokenStore` when a rotated token must survive a restart or
+be coordinated between processes. When Salesforce omits `expires_in`, set
+`sessionTimeout` to your org's session lifetime; it defaults to 900 seconds
+and the connector renews 60 seconds early.
 
 `ConnectionConfig.grpcConfig` accepts Ballerina `grpc:ClientConfiguration` for
 TLS trust material, client certificates, proxy/pool settings, compression, and
@@ -109,5 +122,18 @@ The repository Gradle build uses Docker for Ballerina packaging:
 ```bash
 ./gradlew build
 ```
+
+### Shared-org sandbox tests
+
+Sandbox tests are disabled by default. Copy
+`ballerina/tests/Config.toml.example` to `ballerina/tests/Config.toml` and fill
+in `EP_URL`, `ACCESS_TOKEN`, `CLIENT_ID`, `CLIENT_SECRET`, `REFRESH_URL`,
+`SF_USERNAME`, `SF_PASSWORD`, and `PUBSUB_TENANT_ID` through the corresponding
+`sandbox*` values. `Config.toml` is gitignored and must never be committed.
+Run the non-destructive authentication and platform-event checks with
+`bal test --groups sandbox` from `ballerina`. The suite uses unique correlation
+IDs; platform events are intentionally not deleted. Account CDC lifecycle
+coverage remains in the separate `sandbox-cdc` group because it creates and
+deletes one Account.
 
 See [examples](examples/README.md) for standalone publish and listener source.

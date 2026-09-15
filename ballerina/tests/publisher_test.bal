@@ -1,4 +1,5 @@
 import ballerina/http;
+import ballerina/grpc;
 import ballerina/test;
 import ballerinax/salesforce.pubsub.internal as pubsubApi;
 
@@ -102,4 +103,12 @@ function testAmbiguousPublishErrorIdentifiesSubmittedEvents() {
     test:assertEquals(detail.definitiveResults[0].id, "second");
     test:assertEquals(detail.definitiveResults[0].replayId, [9]);
     test:assertEquals(detail.definitiveResults[0].itemErrorMessage, ());
+}
+
+@test:Config {}
+function testPublishFailureClassificationKeepsDefinitiveGrpcErrorsOutOfAmbiguity() {
+    test:assertFalse(isAmbiguousPublishFailure(error grpc:UnauthenticatedError("expired")));
+    test:assertFalse(isAmbiguousPublishFailure(error grpc:PermissionDeniedError("denied")));
+    test:assertFalse(isAmbiguousPublishFailure(error grpc:InvalidArgumentError("invalid payload")));
+    test:assertTrue(isAmbiguousPublishFailure(error grpc:UnavailableError("transport lost")));
 }
