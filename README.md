@@ -72,10 +72,23 @@ pubsub:PublishResult[] results = check orders->publish([
 ]);
 ```
 
-The Publisher looks up current topic metadata before each batch, retrieves its writer schema through the process-wide tenant/schema cache, generates missing correlation IDs, and checks encoded protobuf event/request sizes against the 1 MB and 4 MB hard limits.
+The Publisher looks up current topic metadata before each batch, retrieves its writer schema through the process-wide tenant/schema cache, and generates missing correlation IDs.
 Payload fields must satisfy the topic's current Avro writer schema. In this
 example, `CreatedDate` and `CreatedById` are non-nullable fields in the sandbox
 event schema.
+
+A batch is split across more than one `Publish` RPC once it exceeds
+`targetRequestSizeBytes` (a soft 3 MB target by default); each chunk is
+attempted independently, so one ambiguous chunk never stops the others from
+being tried. If a chunk's RPC ends without a definitive response, that
+chunk's event IDs come back on the request-level `ambiguous Publish outcome`
+error, but `definitiveResults` on that same error still carries every result
+already obtained from other, unaffected chunks -- so a large multi-chunk
+batch never silently loses successful siblings because one chunk was
+ambiguous. A batch is never automatically resubmitted; the caller decides
+whether to retry the reported IDs. Salesforce's own 1 MB/event and 4 MB/request
+limits are not independently re-checked locally -- an oversized event or
+request surfaces as Salesforce's own item-level or request-level failure.
 
 ## Consume events
 
@@ -92,7 +105,11 @@ check events.attach(handler, "/event/Order_Notification__e");
 check events.'start();
 ```
 
-Without a checkpoint, a topic starts at `LATEST`. An expired checkpoint recovers from `EARLIEST` by default. Because an application side effect and checkpoint save are not atomic, an event can be redelivered after a crash; consumers must make side effects idempotent. The default buffer size is 10 and the connector uses at most one internal liveness reserve slot.
+Without a checkpoint, a topic starts at `LATEST`. An expired checkpoint recovers from `EARLIEST` by default. Because an application side effect and checkpoint save are not atomic, an event can be redelivered after a crash; consumers must make side effects idempotent. The default buffer size is 10, and outstanding protocol request credit never exceeds Salesforce's own maximum of 100.
+
+A Listener may have several topics attached, each with its own independent stream, cursor, and delivery progress -- a slow handler on one topic never blocks another's progress. However, failure handling is listener-wide, not per-topic: once one topic exhausts its retry budget or hits a terminal (non-retryable) error, the whole Listener stops every attached topic's stream, not just the failing one. A service may optionally define `remote function onError(pubsub:ListenerError err) returns error?`; the Listener invokes it on every attached service that defines it (a service with only `onEvent` remains valid) before it finishes stopping. `getLastError()` returns the terminal diagnostic afterward, including which topic and operation failed. See the [multi-topic example](examples/multi-topic) for both an `onError`-aware and a plain `onEvent`-only service attached side by side.
+
+The connector never exits the application process on any failure, including retry exhaustion or a terminal Listener error; it only stops its own streams. Restarting the process, supervising the Listener, and deciding whether/when to restart it (for example under Kubernetes pod replacement) are all the application's responsibility, not the connector's. Restarting with the default `InMemoryReplayStore` starts every topic without its prior checkpoint (`LATEST`, or `CUSTOM` only if you seed one), since that store's state does not survive the process; supply a durable `ReplayStore` implementation if a restart must resume from the last saved position.
 
 ## Consume Change Data Capture events
 
