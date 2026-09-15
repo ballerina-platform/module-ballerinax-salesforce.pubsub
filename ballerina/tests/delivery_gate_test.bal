@@ -15,6 +15,20 @@ function testDeliveryGateRequiresCheckpointBeforeProgress() returns error? {
     test:assertTrue(gate.canReplenish());
 }
 
+// An empty FetchResponse (a keepalive with no events) must still be able to
+// advance the durable cursor when nothing is unresolved -- this is the
+// ordinary case, not just the failure case covered below.
+@test:Config {}
+function testDeliveryGateAllowsEmptyKeepaliveWhenIdle() returns error? {
+    DeliveryGate gate = new;
+
+    test:assertTrue(gate.canCheckpointKeepalive());
+    check gate.beginEvent();
+    check gate.handlerSucceeded();
+    check gate.checkpointSaved();
+    test:assertTrue(gate.canCheckpointKeepalive());
+}
+
 // A handler or checkpoint failure preserves the unresolved event, so a later
 // keepalive candidate cannot move the durable cursor beyond it.
 @test:Config {}

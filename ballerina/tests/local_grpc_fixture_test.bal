@@ -14,6 +14,7 @@ final string FIXTURE_PERMISSION_DENIED_TOPIC = "/event/FixturePermissionDenied__
 final string FIXTURE_REPLAY_RECOVERY_TOPIC = "/event/FixtureReplayRecovery__e";
 final string FIXTURE_STUCK_TOPIC = "/event/FixtureStuck__e";
 final string FIXTURE_MULTI_CHUNK_TOPIC = "/event/FixtureMultiChunk__e";
+final string FIXTURE_FLOW_CONTROL_TOPIC = "/event/FixtureFlowControl__e";
 final string FIXTURE_AMBIGUOUS_CHUNK_TOPIC = "/event/FixtureAmbiguousChunk__e";
 final string FIXTURE_ALWAYS_AMBIGUOUS_TOPIC = "/event/FixtureAlwaysAmbiguous__e";
 // Must start with "/data/": that prefix is what routes an event through CDC
@@ -34,7 +35,7 @@ final string[] FIXTURE_TOPICS = [
     FIXTURE_TOPIC, FIXTURE_ERROR_TOPIC, FIXTURE_RECONNECT_TOPIC, FIXTURE_MULTI_EVENT_TOPIC,
     FIXTURE_PERMISSION_DENIED_TOPIC, FIXTURE_REPLAY_RECOVERY_TOPIC, FIXTURE_STUCK_TOPIC,
     FIXTURE_MULTI_CHUNK_TOPIC, FIXTURE_AMBIGUOUS_CHUNK_TOPIC, FIXTURE_ALWAYS_AMBIGUOUS_TOPIC,
-    FIXTURE_MALFORMED_CDC_TOPIC
+    FIXTURE_MALFORMED_CDC_TOPIC, FIXTURE_FLOW_CONTROL_TOPIC
 ];
 
 isolated int fixtureReconnectTopicAttempts = 0;
@@ -179,6 +180,89 @@ isolated class FixtureStuckAfterOneResponseStream {
     }
 }
 
+final int FIXTURE_FLOW_CONTROL_BUFFER_SIZE = 2;
+final int FIXTURE_FLOW_CONTROL_TOTAL_EVENTS = 4;
+isolated int fixtureFlowControlNonPositiveCreditRequests = 0;
+
+isolated function recordFixtureFlowControlCredit(int numRequested) {
+    lock {
+        if numRequested <= 0 {
+            fixtureFlowControlNonPositiveCreditRequests += 1;
+        }
+    }
+}
+
+isolated function fixtureFlowControlNonPositiveCreditRequestCount() returns int {
+    lock {
+        return fixtureFlowControlNonPositiveCreditRequests;
+    }
+}
+
+// Unlike drainFixtureRequests, records every FetchRequest's credit instead of
+// silently discarding it, so a test can prove the connector never sends a
+// zero (or negative) replacement credit request over the real wire. The two
+// canned responses this topic serves (see FixtureFlowControlResponses below)
+// are sized to match the client's own credit accounting regardless of when
+// this validation actually observes each request arriving: the client
+// increments its local outstanding-credit count synchronously, before it
+// even loops back to receive the next response, so response pacing here
+// doesn't need to (and cannot usefully) wait for a specific request first.
+function validateFixtureFlowControlRequests(stream<wire:FetchRequest, grpc:Error?> requests) {
+    while true {
+        record {|wire:FetchRequest value;|}|grpc:Error? next = requests.next();
+        if next is () || next is grpc:Error {
+            return;
+        }
+        recordFixtureFlowControlCredit(next.value.num_requested);
+    }
+}
+
+// A bufferSize-of-2 subscription to a 4-event topic requests 2 initially,
+// then (after both of those checkpoint) 2 more one-credit-at-a-time
+// replenishment requests before the next response is needed -- so two
+// 2-event responses is exactly what a correctly credit-paced client needs.
+isolated function fixtureFlowControlResponses() returns wire:FetchResponse[]|error {
+    wire:ConsumerEvent[] batch1 = [];
+    wire:ConsumerEvent[] batch2 = [];
+    foreach int i in 1 ... FIXTURE_FLOW_CONTROL_TOTAL_EVENTS {
+        byte[] eventPayload = check encodePayload(FIXTURE_SCHEMA, {"Message__c": "flow-" + i.toString()});
+        wire:ConsumerEvent event = {
+            event: {id: "flow-event-" + i.toString(), schema_id: FIXTURE_SCHEMA_ID, payload: eventPayload},
+            replay_id: [<byte>i]
+        };
+        if i <= FIXTURE_FLOW_CONTROL_BUFFER_SIZE {
+            batch1.push(event);
+        } else {
+            batch2.push(event);
+        }
+    }
+    return [{events: batch1}, {events: batch2}];
+}
+
+// Serves a fixed sequence of canned responses (unlike
+// FixtureOneResponseThenIdleStream's single response), then idles.
+isolated class FixtureMultiResponseThenIdleStream {
+    private final wire:FetchResponse[] & readonly responses;
+    private int served = 0;
+
+    isolated function init(wire:FetchResponse[] responses) {
+        self.responses = responses.cloneReadOnly();
+    }
+
+    public isolated function next() returns record {|wire:FetchResponse value;|}|error? {
+        int index;
+        lock {
+            index = self.served;
+            self.served += 1;
+        }
+        if index < self.responses.length() {
+            return {value: self.responses[index]};
+        }
+        runtime:sleep(FIXTURE_IDLE_SECONDS);
+        return ();
+    }
+}
+
 listener grpc:Listener fixtureListener = new (FIXTURE_PORT, {
     host: "localhost",
     secureSocket: {
@@ -237,6 +321,11 @@ service "PubSub" on fixtureListener {
         record {|wire:FetchRequest value;|}? first = check requests.next();
         if first is () {
             return error("no fetch request received");
+        }
+        if first.value.topic_name == FIXTURE_FLOW_CONTROL_TOPIC {
+            recordFixtureFlowControlCredit(first.value.num_requested);
+            future<()> _ = start validateFixtureFlowControlRequests(requests);
+            return new stream<wire:FetchResponse, error?>(new FixtureMultiResponseThenIdleStream(check fixtureFlowControlResponses()));
         }
         // The generated bidi dispatch stops accepting inbound messages soon
         // after this handler body returns its response value, so a client's
@@ -518,6 +607,34 @@ function testListenerGracefulStopBoundsWaitOnAnIdleStream() returns error? {
     decimal elapsed = time:utcDiffSeconds(time:utcNow(), before);
     test:assertTrue(elapsed < 6.5d, "gracefulStop should not hang past its timeout, took " + elapsed.toString() + "s");
     test:assertTrue(elapsed > 3.0d, "expected gracefulStop to actually wait out the timeout, took " + elapsed.toString() + "s");
+}
+
+// This fails if a small bufferSize ever lets a replacement FetchRequest carry
+// zero (or negative) credit, or if draining more events than one batch's
+// initial credit loses or reorders any of them across the several
+// replenishment round trips a buffer of 2 forces for 4 total events.
+@test:Config {}
+function testListenerBoundsWireCreditAcrossMultipleReplenishmentRoundTrips() returns error? {
+    InMemoryReplayStore replayStore = new;
+    Listener endpoint = check new ({
+        connection: {
+            auth: <http:BearerTokenConfig>{token: "fixture-token"},
+            instanceUrl: "https://fixture.my.salesforce.com",
+            tenantId: "00DFixture000001",
+            endpoint: "https://localhost:" + FIXTURE_PORT.toString(),
+            grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
+        },
+        replayStore,
+        subscriptionDefaults: {bufferSize: FIXTURE_FLOW_CONTROL_BUFFER_SIZE, reconnectRetry: {maxRetries: 0}}
+    });
+    FixtureFailingAtService handler = new ("never-fails");
+    check endpoint.attach(handler, FIXTURE_FLOW_CONTROL_TOPIC);
+    check endpoint.'start();
+    runtime:sleep(0.5);
+    check endpoint.immediateStop();
+
+    test:assertEquals(handler.messages(), ["flow-1", "flow-2", "flow-3", "flow-4"]);
+    test:assertEquals(fixtureFlowControlNonPositiveCreditRequestCount(), 0);
 }
 
 // This fails if a reconnectable Subscribe failure does not actually reopen a

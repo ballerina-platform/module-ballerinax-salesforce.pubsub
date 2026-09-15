@@ -23,8 +23,6 @@ public isolated class FlowController {
     private final int normalCapacity;
     private int outstandingCredit = 0;
     private int bufferedEvents = 0;
-    private boolean livenessReserveInUse = false;
-    private boolean livenessReserveBuffered = false;
 
     # Creates a controller with the requested event-count buffer.
     #
@@ -62,49 +60,18 @@ public isolated class FlowController {
             }
             self.outstandingCredit -= count;
             self.bufferedEvents += count;
-            if self.livenessReserveInUse && !self.livenessReserveBuffered && count == 1 &&
-                    self.outstandingCredit == 0 {
-                self.livenessReserveBuffered = true;
-            }
-        }
-    }
-
-    # Uses the one internal reserve slot when a full normal buffer would
-    # otherwise leave Salesforce with no outstanding positive request.
-    #
-    # + return - one for a new positive request, or zero when reserve is unavailable
-    public isolated function requestLivenessReserve() returns int|error {
-        lock {
-            if self.livenessReserveInUse || self.bufferedEvents + self.outstandingCredit < self.normalCapacity {
-                return 0;
-            }
-            self.livenessReserveInUse = true;
-            self.outstandingCredit += 1;
-            return 1;
         }
     }
 
     # Releases capacity only after the current event was both handled and
-    # durably checkpointed. Callers must identify a liveness-reserve event from
-    # their queue metadata; it is never replaced by another request.
+    # durably checkpointed.
     #
-    # + livenessReserveEvent - whether the completed event consumed the reserve
-    # + return - a positive replacement request, or zero for a reserve event
-    public isolated function checkpointed(boolean livenessReserveEvent = false) returns int|error {
+    # + return - a positive replacement request, or zero while the buffer stays full
+    public isolated function checkpointed() returns int|error {
         lock {
             if self.bufferedEvents <= 0 {
                 return error("no buffered event is available to checkpoint");
             }
-            if livenessReserveEvent {
-                if !self.livenessReserveBuffered {
-                    return error("no liveness reserve event is buffered");
-                }
-                self.bufferedEvents -= 1;
-                self.livenessReserveBuffered = false;
-                self.livenessReserveInUse = false;
-                return 0;
-            }
-
             self.bufferedEvents -= 1;
             if self.bufferedEvents + self.outstandingCredit >= self.normalCapacity {
                 return 0;
