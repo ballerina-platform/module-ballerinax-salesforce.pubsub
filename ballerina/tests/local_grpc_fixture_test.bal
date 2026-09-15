@@ -532,6 +532,29 @@ function testPublisherUsesLocalTlsGrpcFixture() returns error? {
     test:assertEquals(results[0].replayId, [1, 2, 3]);
 }
 
+// This fails if a connection with no configured trust root silently accepts
+// the fixture's self-signed certificate instead of failing the TLS handshake,
+// or if the resulting error leaks the configured bearer token.
+@test:Config {}
+function testPublisherFailsClosedWithoutTrustingTheFixtureCertificate() returns error? {
+    Publisher publisher = check new ({
+        connection: {
+            auth: <http:BearerTokenConfig>{token: "fixture-token-should-not-leak"},
+            instanceUrl: "https://fixture.my.salesforce.com",
+            tenantId: "00DFixture000001",
+            endpoint: "https://localhost:" + FIXTURE_PORT.toString()
+        },
+        topic: FIXTURE_TOPIC
+    });
+
+    wire:TopicInfo|error result = publisher->getTopic();
+    test:assertTrue(result is error, "an untrusted self-signed certificate must fail the TLS handshake");
+    if result is error {
+        test:assertFalse(result.message().includes("fixture-token-should-not-leak"),
+            "a TLS failure must never surface the configured access token");
+    }
+}
+
 // This fails if a batch larger than the configured request-size target is
 // sent as one oversized Publish RPC instead of being transparently split, or
 // if the split results lose their original order/correlation.

@@ -32,7 +32,7 @@ isolated class PubSubTokenManager {
     # token in the supplied TokenStore; the other standard OAuth grants use
     # Ballerina's process-local OAuth provider cache.
     isolated function getAccessToken() returns string|error {
-        salesforce:OAuth2Config auth = self.auth;
+        readonly & salesforce:OAuth2Config auth = self.auth;
         if auth is http:BearerTokenConfig {
             if auth.token.length() == 0 {
                 return error("bearer token must not be empty");
@@ -63,91 +63,100 @@ isolated class PubSubTokenManager {
         }
     }
 
-    private isolated function standardGrantToken(salesforce:OAuth2Config auth) returns string|error {
-        oauth2:ClientOAuth2Provider? currentProvider;
+    // Holding the lock across the whole check-then-create sequence (not just
+    // the field write) makes concurrent callers on a cold cache single-flight:
+    // a second caller blocks until the first has published a provider, then
+    // reuses it instead of racing to construct its own.
+    private isolated function standardGrantToken(readonly & salesforce:OAuth2Config auth) returns string|error {
         lock {
-            currentProvider = self.grantProvider;
-        }
-        if currentProvider is oauth2:ClientOAuth2Provider {
-            string|oauth2:Error token = currentProvider.generateToken();
+            oauth2:ClientOAuth2Provider? existingProvider = self.grantProvider;
+            oauth2:ClientOAuth2Provider provider;
+            if existingProvider is oauth2:ClientOAuth2Provider {
+                provider = existingProvider;
+            } else {
+                oauth2:ClientCredentialsGrantConfig|oauth2:PasswordGrantConfig grant =
+                        check auth.cloneWithType();
+                provider = new (grant);
+                self.grantProvider = provider;
+            }
+            string|oauth2:Error token = provider.generateToken();
             return token is string ? token : error("OAuth token request failed");
         }
-        oauth2:ClientCredentialsGrantConfig|oauth2:PasswordGrantConfig grant =
-                check auth.cloneWithType();
-        oauth2:ClientOAuth2Provider provider = new (grant);
-        lock {
-            self.grantProvider = provider;
-        }
-        string|oauth2:Error token = provider.generateToken();
-        return token is string ? token : error("OAuth token request failed");
     }
 
-    private isolated function refreshTokenGrant(http:OAuth2RefreshTokenGrantConfig auth) returns string|error {
+    // As above: the whole refresh-token critical section runs inside one lock
+    // so concurrent local callers serialize onto a single HTTP refresh instead
+    // of each independently missing the store's cache. The store's own
+    // acquireLock/releaseLock remain for a real distributed TokenStore shared
+    // across processes, where this process-local lock offers no protection.
+    private isolated function refreshTokenGrant(readonly & http:OAuth2RefreshTokenGrantConfig auth) returns string|error {
         string storeKey = "salesforce.pubsub:" + auth.clientId;
-        salesforce:TokenData? cached = check self.tokenStore.getTokenData(storeKey);
-        if cached is salesforce:TokenData && isUsable(cached) {
-            return cached.accessToken;
-        }
-        boolean acquired = check self.tokenStore.acquireLock(storeKey, TOKEN_STORE_LOCK_TTL_SECONDS);
-        if !acquired {
-            return error("OAuth token refresh is in progress in another process");
-        }
-        string|error result = self.refreshWhileLocked(auth, storeKey);
-        error? releaseError = self.tokenStore.releaseLock(storeKey);
-        if result is error {
+        lock {
+            salesforce:TokenData? cached = check self.tokenStore.getTokenData(storeKey);
+            if cached is salesforce:TokenData && isUsable(cached) {
+                return cached.accessToken;
+            }
+            boolean acquired = check self.tokenStore.acquireLock(storeKey, TOKEN_STORE_LOCK_TTL_SECONDS);
+            if !acquired {
+                return error("OAuth token refresh is in progress in another process");
+            }
+            string|error result = refreshWhileLocked(self.tokenStore, auth, storeKey, self.sessionTimeout);
+            error? releaseError = self.tokenStore.releaseLock(storeKey);
+            if result is error {
+                return result;
+            }
+            if releaseError is error {
+                return releaseError;
+            }
             return result;
         }
-        if releaseError is error {
-            return releaseError;
-        }
-        return result;
     }
+}
 
-    private isolated function refreshWhileLocked(http:OAuth2RefreshTokenGrantConfig auth, string storeKey)
-            returns string|error {
-        salesforce:TokenData? cached = check self.tokenStore.getTokenData(storeKey);
-        if cached is salesforce:TokenData && isUsable(cached) {
-            return cached.accessToken;
-        }
-        string refreshToken = cached is salesforce:TokenData && cached.refreshToken.length() > 0 ?
-                cached.refreshToken : auth.refreshToken;
-        http:Client tokenClient = check new (auth.refreshUrl);
-        string encodedRefresh = check url:encode(refreshToken, "UTF-8");
-        string encodedClientId = check url:encode(auth.clientId, "UTF-8");
-        string encodedClientSecret = check url:encode(auth.clientSecret, "UTF-8");
-        string body = "grant_type=refresh_token&refresh_token=" + encodedRefresh + "&client_id=" + encodedClientId +
-                "&client_secret=" + encodedClientSecret;
-        http:Response response = check tokenClient->post("", body, mediaType = "application/x-www-form-urlencoded");
-        json responseBody = check response.getJsonPayload();
-        if response.statusCode < 200 || response.statusCode >= 300 {
-            if responseBody is map<json> && responseBody.hasKey("error") && responseBody["error"] == "invalid_grant" {
-                check self.tokenStore.clearTokenData(storeKey);
-                return error("OAuth refresh token is no longer valid; re-authentication is required");
-            }
-            return error("OAuth token request failed");
-        }
-        string accessToken = check (check responseBody.access_token).ensureType(string);
-        string rotatedRefreshToken = refreshToken;
-        json|error rotated = responseBody.refresh_token;
-        if rotated is string && rotated.length() > 0 {
-            rotatedRefreshToken = rotated;
-        }
-        [int, decimal] now = time:utcNow();
-        int lifetime = self.sessionTimeout;
-        json|error expiresIn = responseBody.expires_in;
-        if expiresIn is int && expiresIn > TOKEN_REFRESH_BUFFER_SECONDS {
-            lifetime = expiresIn;
-        }
-        int expiresAt = now[0] + lifetime - TOKEN_REFRESH_BUFFER_SECONDS;
-        check self.tokenStore.setTokenData(storeKey, {
-            accessToken,
-            refreshToken: rotatedRefreshToken,
-            accessTokenExpiryEpoch: expiresAt,
-            issuedAtEpoch: now[0],
-            lastRefreshedAtEpoch: now[0]
-        });
-        return accessToken;
+isolated function refreshWhileLocked(salesforce:TokenStore tokenStore, readonly & http:OAuth2RefreshTokenGrantConfig auth,
+        string storeKey, int sessionTimeout) returns string|error {
+    salesforce:TokenData? cached = check tokenStore.getTokenData(storeKey);
+    if cached is salesforce:TokenData && isUsable(cached) {
+        return cached.accessToken;
     }
+    string refreshToken = cached is salesforce:TokenData && cached.refreshToken.length() > 0 ?
+            cached.refreshToken : auth.refreshToken;
+    http:Client tokenClient = check new (auth.refreshUrl);
+    string encodedRefresh = check url:encode(refreshToken, "UTF-8");
+    string encodedClientId = check url:encode(auth.clientId, "UTF-8");
+    string encodedClientSecret = check url:encode(auth.clientSecret, "UTF-8");
+    string body = "grant_type=refresh_token&refresh_token=" + encodedRefresh + "&client_id=" + encodedClientId +
+            "&client_secret=" + encodedClientSecret;
+    http:Response response = check tokenClient->post("", body, mediaType = "application/x-www-form-urlencoded");
+    json responseBody = check response.getJsonPayload();
+    if response.statusCode < 200 || response.statusCode >= 300 {
+        if responseBody is map<json> && responseBody.hasKey("error") && responseBody["error"] == "invalid_grant" {
+            check tokenStore.clearTokenData(storeKey);
+            return error("OAuth refresh token is no longer valid; re-authentication is required");
+        }
+        return error("OAuth token request failed");
+    }
+    string accessToken = check (check responseBody.access_token).ensureType(string);
+    string rotatedRefreshToken = refreshToken;
+    json|error rotated = responseBody.refresh_token;
+    if rotated is string && rotated.length() > 0 {
+        rotatedRefreshToken = rotated;
+    }
+    [int, decimal] now = time:utcNow();
+    int lifetime = sessionTimeout;
+    json|error expiresIn = responseBody.expires_in;
+    if expiresIn is int && expiresIn > TOKEN_REFRESH_BUFFER_SECONDS {
+        lifetime = expiresIn;
+    }
+    int expiresAt = now[0] + lifetime - TOKEN_REFRESH_BUFFER_SECONDS;
+    check tokenStore.setTokenData(storeKey, {
+        accessToken,
+        refreshToken: rotatedRefreshToken,
+        accessTokenExpiryEpoch: expiresAt,
+        issuedAtEpoch: now[0],
+        lastRefreshedAtEpoch: now[0]
+    });
+    return accessToken;
 }
 
 isolated function isUsable(salesforce:TokenData tokenData) returns boolean {

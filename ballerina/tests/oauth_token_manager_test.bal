@@ -64,6 +64,50 @@ function testRefreshTokenManagerPersistsRotatedTokenAndReusesIt() returns error?
     }
 }
 
+// A cold cache with several concurrent callers on one manager must not send
+// one refresh request per caller; the TokenStore lock should serialize them
+// onto a single refresh, with every caller still receiving a usable token.
+@test:Config {}
+function testConcurrentRefreshTokenRequestsShareOneRefresh() returns error? {
+    int requestsBefore;
+    lock {
+        requestsBefore = tokenFixtureRequests;
+    }
+    ConnectionConfig connection = {
+        auth: <http:OAuth2RefreshTokenGrantConfig>{
+            refreshUrl: OAUTH_FIXTURE_URL,
+            refreshToken: "seed-refresh-token",
+            clientId: "concurrent-refresh-client",
+            clientSecret: "refresh-secret"
+        },
+        tokenStore: new salesforce:InMemoryTokenStore(),
+        instanceUrl: "https://example.my.salesforce.com",
+        tenantId: "00Dtest"
+    };
+    PubSubTokenManager manager = new (connection);
+
+    future<string|error>[] calls = [];
+    foreach int _ in 0 ..< 5 {
+        future<string|error> call = start manager.getAccessToken();
+        calls.push(call);
+    }
+    string[] tokens = [];
+    foreach future<string|error> call in calls {
+        string|error result = wait call;
+        if result is string {
+            tokens.push(result);
+        }
+    }
+    test:assertEquals(tokens.length(), 5, "every concurrent caller should receive a usable token");
+    foreach string token in tokens {
+        test:assertEquals(token, "rotated-access-token");
+    }
+    lock {
+        test:assertEquals(tokenFixtureRequests, requestsBefore + 1,
+            "concurrent callers on a cold cache must share a single refresh request");
+    }
+}
+
 @test:Config {}
 function testRefreshTokenManagerReplacesExpiredStoredToken() returns error? {
     salesforce:TokenStore store = new salesforce:InMemoryTokenStore();
