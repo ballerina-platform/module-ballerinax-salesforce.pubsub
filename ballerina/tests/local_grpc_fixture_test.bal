@@ -1233,6 +1233,85 @@ function testListenerStopsAllTopicsWhenOneFailsTerminally() returns error? {
     check endpoint.immediateStop();
 }
 
+// This fails if two topics sharing one Listener do not each track their own
+// replay cursor independently -- for example if a shared/reused piece of
+// state let one topic's progress overwrite or block the other's -- and if a
+// deliberately slower handler on one topic ever holds up the other topic's
+// concurrent delivery and checkpointing.
+@test:Config {}
+function testListenerMakesIndependentProgressAcrossTwoTopics() returns error? {
+    InMemoryReplayStore replayStore = new;
+    Listener endpoint = check new ({
+        connection: {
+            auth: <http:BearerTokenConfig>{token: "fixture-token"},
+            instanceUrl: "https://fixture.my.salesforce.com",
+            tenantId: "00DFixture000001",
+            endpoint: "https://localhost:" + FIXTURE_PORT.toString(),
+            grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
+        },
+        replayStore
+    });
+    Service slowHandler = service object {
+        remote function onEvent(Event event) returns error? {
+            // Long enough to still be in progress while the other topic's
+            // fast handler finishes and checkpoints, if they were wrongly
+            // serialized against each other instead of running concurrently.
+            runtime:sleep(0.3);
+            return ();
+        }
+    };
+    FixtureCountingService fastHandler = new;
+    check endpoint.attach(slowHandler, FIXTURE_TOPIC);
+    check endpoint.attach(fastHandler, FIXTURE_MULTI_EVENT_TOPIC);
+    check endpoint.'start();
+    runtime:sleep(0.6);
+    check endpoint.immediateStop();
+
+    test:assertEquals(fastHandler.deliveryCount(), 10);
+    byte[]? slowTopicReplayId = check replayStore.load({
+        tenantId: "00DFixture000001", topic: FIXTURE_TOPIC, subscriptionName: "default"
+    });
+    byte[]? fastTopicReplayId = check replayStore.load({
+        tenantId: "00DFixture000001", topic: FIXTURE_MULTI_EVENT_TOPIC, subscriptionName: "default"
+    });
+    test:assertEquals(slowTopicReplayId, [7, 8, 9]);
+    test:assertEquals(fastTopicReplayId, [<byte>10]);
+}
+
+// This fails if a topic that fails to open (here, an unrecognized topic name)
+// leaves an earlier, already-opened topic's stream dangling instead of being
+// cleaned up as part of 'start() surfacing the failure -- proven by a
+// subsequent stop being a safe no-op rather than erroring on leaked state.
+@test:Config {}
+function testListenerCleansUpAlreadyOpenedTopicsWhenAnotherFailsToOpen() returns error? {
+    InMemoryReplayStore replayStore = new;
+    Listener endpoint = check new ({
+        connection: {
+            auth: <http:BearerTokenConfig>{token: "fixture-token"},
+            instanceUrl: "https://fixture.my.salesforce.com",
+            tenantId: "00DFixture000001",
+            endpoint: "https://localhost:" + FIXTURE_PORT.toString(),
+            grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
+        },
+        replayStore
+    });
+    Service handler = service object {
+        remote function onEvent(Event event) returns error? {
+            return ();
+        }
+    };
+    check endpoint.attach(handler, FIXTURE_TOPIC);
+    check endpoint.attach(handler, "/event/FixtureNotRegisteredWithFixtureServer__e");
+    error? startError = endpoint.'start();
+
+    test:assertTrue(startError is error);
+    test:assertTrue(endpoint.getLastError() is (), "a start-time failure is not the same as a post-start terminal failure");
+    // If the first topic's stream were left open, this would either error or
+    // there would be nothing meaningful left to clean up safely twice.
+    check endpoint.immediateStop();
+    check endpoint.immediateStop();
+}
+
 // This fails if calling gracefulStop/immediateStop more than once errors or
 // double-closes state instead of being a safe no-op.
 @test:Config {}
