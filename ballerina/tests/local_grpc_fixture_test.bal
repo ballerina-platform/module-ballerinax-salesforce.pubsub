@@ -9,6 +9,7 @@ final int FIXTURE_PORT = 19091;
 final string FIXTURE_TOPIC = "/event/Fixture__e";
 final string FIXTURE_ERROR_TOPIC = "/event/FixtureError__e";
 final string FIXTURE_RECONNECT_TOPIC = "/event/FixtureReconnect__e";
+final string FIXTURE_RECONNECT_TOKEN_TOPIC = "/event/FixtureReconnectToken__e";
 final string FIXTURE_MULTI_EVENT_TOPIC = "/event/FixtureMultiEvent__e";
 final string FIXTURE_PERMISSION_DENIED_TOPIC = "/event/FixturePermissionDenied__e";
 final string FIXTURE_REPLAY_RECOVERY_TOPIC = "/event/FixtureReplayRecovery__e";
@@ -49,7 +50,7 @@ final string FIXTURE_CDC_SCHEMA = "{\"type\":\"record\",\"name\":\"AccountChange
     "{\"name\":\"Name\",\"type\":[\"null\",\"string\"]}]}";
 
 final string[] FIXTURE_TOPICS = [
-    FIXTURE_TOPIC, FIXTURE_ERROR_TOPIC, FIXTURE_RECONNECT_TOPIC, FIXTURE_MULTI_EVENT_TOPIC,
+    FIXTURE_TOPIC, FIXTURE_ERROR_TOPIC, FIXTURE_RECONNECT_TOPIC, FIXTURE_RECONNECT_TOKEN_TOPIC, FIXTURE_MULTI_EVENT_TOPIC,
     FIXTURE_PERMISSION_DENIED_TOPIC, FIXTURE_REPLAY_RECOVERY_TOPIC, FIXTURE_STUCK_TOPIC,
     FIXTURE_MULTI_CHUNK_TOPIC, FIXTURE_AMBIGUOUS_CHUNK_TOPIC, FIXTURE_ALWAYS_AMBIGUOUS_TOPIC,
     FIXTURE_MALFORMED_CDC_TOPIC, FIXTURE_FLOW_CONTROL_TOPIC, FIXTURE_CDC_EVENTS_TOPIC,
@@ -57,6 +58,7 @@ final string[] FIXTURE_TOPICS = [
 ];
 
 isolated int fixtureReconnectTopicAttempts = 0;
+isolated int fixtureReconnectTokenTopicAttempts = 0;
 isolated int fixturePermissionDeniedAttempts = 0;
 isolated int fixtureMultiChunkPublishCalls = 0;
 isolated int fixtureMultiChunkPublishedEvents = 0;
@@ -66,6 +68,13 @@ isolated function nextFixtureReconnectAttempt() returns int {
     lock {
         fixtureReconnectTopicAttempts += 1;
         return fixtureReconnectTopicAttempts;
+    }
+}
+
+isolated function nextFixtureReconnectTokenAttempt() returns int {
+    lock {
+        fixtureReconnectTokenTopicAttempts += 1;
+        return fixtureReconnectTokenTopicAttempts;
     }
 }
 
@@ -374,6 +383,16 @@ service "PubSub" on fixtureListener {
             if nextFixtureReconnectAttempt() == 1 {
                 // A normal, non-transport-level closure: reconnectable, but
                 // must not force recreating the shared channel.
+                return error("Subscribe stream closed");
+            }
+            byte[] reconnectPayload = check encodePayload(FIXTURE_SCHEMA, {"Message__c": "reconnected"});
+            wire:FetchResponse reconnectResponse = {
+                events: [{event: {id: "reconnected-event", schema_id: FIXTURE_SCHEMA_ID, payload: reconnectPayload}, replay_id: [4, 5, 6]}]
+            };
+            return new stream<wire:FetchResponse, error?>(new FixtureOneResponseThenIdleStream(reconnectResponse));
+        }
+        if first.value.topic_name == FIXTURE_RECONNECT_TOKEN_TOPIC {
+            if nextFixtureReconnectTokenAttempt() == 1 {
                 return error("Subscribe stream closed");
             }
             byte[] reconnectPayload = check encodePayload(FIXTURE_SCHEMA, {"Message__c": "reconnected"});
@@ -794,6 +813,59 @@ function testListenerReconnectsAndResumesDeliveryAfterStreamClosure() returns er
         subscriptionName: "default"
     });
     test:assertEquals(replayId, [4, 5, 6]);
+}
+
+// This fails if reconnecting a closed stream skips resolving a token through
+// the configured OAuth grant (the reconnect path is exercised only via
+// openTopicSubscription being re-invoked; nothing here special-cases it), or
+// if it wastefully fetches a brand-new token on every reconnect attempt
+// instead of reusing one that is still valid.
+@test:Config {}
+function testListenerReusesValidRefreshTokenAcrossReconnect() returns error? {
+    int requestsBefore;
+    lock {
+        requestsBefore = tokenFixtureRequests;
+    }
+    InMemoryReplayStore replayStore = new;
+    Listener endpoint = check new ({
+        connection: {
+            auth: <http:OAuth2RefreshTokenGrantConfig>{
+                refreshUrl: OAUTH_FIXTURE_URL,
+                refreshToken: "seed-refresh-token",
+                clientId: "reconnect-refresh-client",
+                clientSecret: "refresh-secret"
+            },
+            instanceUrl: "https://fixture.my.salesforce.com",
+            tenantId: "00DFixture000001",
+            endpoint: "https://localhost:" + FIXTURE_PORT.toString(),
+            grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
+        },
+        replayStore,
+        subscriptionConfig: {
+            handlerRetry: {maxRetries: 0},
+            reconnectRetry: {maxRetries: 1, initialDelay: 0.05, maxDelay: 0.05}
+        }
+    });
+    Service handler = service object {
+        remote function onEvent(Event event) returns error? {
+            return ();
+        }
+    };
+    check endpoint.attach(handler, FIXTURE_RECONNECT_TOKEN_TOPIC);
+    check endpoint.'start();
+    runtime:sleep(0.5);
+    check endpoint.immediateStop();
+
+    byte[]? replayId = check replayStore.load({
+        tenantId: "00DFixture000001",
+        topic: FIXTURE_RECONNECT_TOKEN_TOPIC,
+        subscriptionName: "default"
+    });
+    test:assertEquals(replayId, [4, 5, 6], "expected the listener to reconnect and resume delivery");
+    lock {
+        test:assertEquals(tokenFixtureRequests, requestsBefore + 1,
+            "the initial stream open and the reconnect should share one still-valid token, not one fetch each");
+    }
 }
 
 isolated service class FixtureCountingService {
