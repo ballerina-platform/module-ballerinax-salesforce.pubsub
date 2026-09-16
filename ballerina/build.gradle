@@ -74,6 +74,7 @@ task updateTomlFiles {
 // an incompatible Dependencies.toml in the workspace.
 task resolveBallerinaDependencies(type: Exec) {
     dependsOn unpackJballerinaTools
+    dependsOn copyStdlibs
     workingDir project.projectDir
     doFirst {
         delete file("$project.projectDir/Dependencies.toml")
