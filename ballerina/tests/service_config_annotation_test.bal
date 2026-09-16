@@ -33,20 +33,18 @@ function testServiceConfigAnnotationOverridesEveryField() {
         expiredReplayRecovery: LATEST,
         bufferSize: 42,
         handlerRetry: {maxRetries: 7},
-        reconnectRetry: {maxRetries: 9},
-        topic: "/data/Donation__ChangeEvent"
+        reconnectRetry: {maxRetries: 9}
     } service object {
         remote function onEvent(Event event) returns error? {
         }
     };
 
-    [SubscriptionConfig, string?] [resolved, resolvedTopic] = subscriptionConfigFor(config.subscriptionConfig, annotatedService);
+    SubscriptionConfig resolved = subscriptionConfigFor(config, annotatedService);
     test:assertEquals(resolved.initialReplay, EARLIEST);
     test:assertEquals(resolved.expiredReplayRecovery, LATEST);
     test:assertEquals(resolved.bufferSize, 42);
     test:assertEquals(resolved.handlerRetry.maxRetries, 7);
     test:assertEquals(resolved.reconnectRetry.maxRetries, 9);
-    test:assertEquals(resolvedTopic, "/data/Donation__ChangeEvent");
 }
 
 // This fails if a partial @ServiceConfig annotation accidentally merges with
@@ -64,7 +62,7 @@ function testServiceConfigAnnotationReplacesWholeRecordNotFieldByField() {
         }
     };
 
-    [SubscriptionConfig, string?] [resolved, _] = subscriptionConfigFor(config.subscriptionConfig, annotatedService);
+    SubscriptionConfig resolved = subscriptionConfigFor(config, annotatedService);
     test:assertEquals(resolved.bufferSize, 20);
     // SubscriptionConfig's own default (LATEST), not the listener's EARLIEST.
     test:assertEquals(resolved.initialReplay, LATEST);
@@ -83,7 +81,7 @@ function testServiceConfigResolutionFallsBackWhenAnnotationAbsent() {
         }
     };
 
-    [SubscriptionConfig, string?] [resolved, _] = subscriptionConfigFor(config.subscriptionConfig, unannotatedService);
+    SubscriptionConfig resolved = subscriptionConfigFor(config, unannotatedService);
     test:assertEquals(resolved.bufferSize, 33);
 }
 

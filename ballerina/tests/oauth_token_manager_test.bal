@@ -21,6 +21,8 @@ import ballerinax/salesforce;
 
 final int OAUTH_FIXTURE_PORT = 19092;
 final string OAUTH_FIXTURE_URL = "http://localhost:19092/token";
+final string OAUTH_FIXTURE_NON_JSON_URL = "http://localhost:19092/non-json-error";
+final string OAUTH_FIXTURE_NON_JSON_SUCCESS_URL = "http://localhost:19092/non-json-success";
 isolated int tokenFixtureRequests = 0;
 
 listener http:Listener oauthFixture = check new (OAUTH_FIXTURE_PORT);
@@ -31,6 +33,28 @@ service /token on oauthFixture {
             tokenFixtureRequests += 1;
         }
         return {access_token: "rotated-access-token", refresh_token: "rotated-refresh-token", expires_in: 3600};
+    }
+}
+
+// Reproduces a misconfigured/unreachable token endpoint: a non-2xx response
+// whose body is not JSON at all (an HTML error page, a plain-text 404, a
+// proxy/WAF block page) rather than Salesforce's own documented
+// `{"error": "..."}` shape.
+service /non\-json\-error on oauthFixture {
+    resource function post .() returns http:NotFound {
+        return {body: "<html><body>Not Found</body></html>", mediaType: "text/html"};
+    }
+}
+
+// Reproduces a misconfigured refreshUrl that resolves to something other than
+// the token endpoint but still answers with a 2xx (a login page, a captive
+// portal, a redirect target) -- the status check alone can't catch this, only
+// the JSON parse can.
+service /non\-json\-success on oauthFixture {
+    resource function post .() returns http:Response {
+        http:Response response = new;
+        response.setTextPayload("<html><body>login page</body></html>", "text/html");
+        return response;
     }
 }
 
@@ -153,6 +177,103 @@ function testRefreshTokenManagerReplacesExpiredStoredToken() returns error? {
     test:assertTrue(updated is salesforce:TokenData);
     if updated is salesforce:TokenData {
         test:assertEquals(updated.refreshToken, "rotated-refresh-token");
+    }
+}
+
+// This fails if invalidating a stored access token panics instead of
+// returning a normal error: InMemoryTokenStore.getTokenData() can return a
+// `readonly` record, and mutating a field on that value in place (rather than
+// building a new record) throws an uncatchable Ballerina inherent-type-violation
+// panic -- observed live via a real Listener whose first GetTopic call got
+// UNAUTHENTICATED, which crashed the whole worker strand silently instead of
+// refreshing the token and retrying.
+@test:Config {}
+function testInvalidateAccessTokenClearsStoredExpiryWithoutPanicking() returns error? {
+    salesforce:TokenStore store = new salesforce:InMemoryTokenStore();
+    [int, decimal] now = time:utcNow();
+    check store.setTokenData("salesforce.pubsub:invalidate-client", {
+        accessToken: "still-valid-access-token",
+        refreshToken: "seed-refresh-token",
+        accessTokenExpiryEpoch: now[0] + 3600,
+        issuedAtEpoch: now[0],
+        lastRefreshedAtEpoch: now[0]
+    });
+    ConnectionConfig connection = {
+        auth: <http:OAuth2RefreshTokenGrantConfig>{
+            refreshUrl: OAUTH_FIXTURE_URL,
+            refreshToken: "seed-refresh-token",
+            clientId: "invalidate-client",
+            clientSecret: "refresh-secret"
+        },
+        tokenStore: store,
+        instanceUrl: "https://example.my.salesforce.com",
+        tenantId: "00Dtest"
+    };
+
+    PubSubTokenManager manager = new (connection);
+    check manager.invalidateAccessToken();
+
+    salesforce:TokenData? invalidated = check store.getTokenData("salesforce.pubsub:invalidate-client");
+    test:assertTrue(invalidated is salesforce:TokenData);
+    if invalidated is salesforce:TokenData {
+        test:assertEquals(invalidated.accessTokenExpiryEpoch, 0);
+        test:assertEquals(invalidated.accessToken, "still-valid-access-token",
+            "invalidation clears only the expiry, not the access token itself");
+    }
+}
+
+// This fails if a non-2xx token-endpoint response whose body isn't JSON at
+// all (an HTML error page, a wrong-endpoint 404, a proxy/WAF block page)
+// surfaces as Ballerina's generic "error occurred while retrieving the json
+// payload" instead of a clear, status-code-including OAuth failure.
+@test:Config {}
+function testRefreshTokenManagerReportsStatusOnNonJsonErrorResponse() returns error? {
+    ConnectionConfig connection = {
+        auth: <http:OAuth2RefreshTokenGrantConfig>{
+            refreshUrl: OAUTH_FIXTURE_NON_JSON_URL,
+            refreshToken: "seed-refresh-token",
+            clientId: "non-json-error-client",
+            clientSecret: "refresh-secret"
+        },
+        tokenStore: new salesforce:InMemoryTokenStore(),
+        instanceUrl: "https://example.my.salesforce.com",
+        tenantId: "00Dtest"
+    };
+
+    PubSubTokenManager manager = new (connection);
+    string|error result = manager.getAccessToken();
+    test:assertTrue(result is error, "a non-JSON error response must not be treated as a usable token");
+    if result is error {
+        string message = result.message();
+        test:assertTrue(message.includes("404"), "expected the real HTTP status to be in the error message, got: " + message);
+    }
+}
+
+// This fails if a 2xx token-endpoint response whose body isn't JSON (a
+// misconfigured refreshUrl that lands on a login page or redirect target
+// instead of the real token endpoint) surfaces as Ballerina's generic "error
+// occurred while retrieving the json payload" instead of a clear,
+// status-code-including OAuth failure.
+@test:Config {}
+function testRefreshTokenManagerReportsStatusOnNonJsonSuccessResponse() returns error? {
+    ConnectionConfig connection = {
+        auth: <http:OAuth2RefreshTokenGrantConfig>{
+            refreshUrl: OAUTH_FIXTURE_NON_JSON_SUCCESS_URL,
+            refreshToken: "seed-refresh-token",
+            clientId: "non-json-success-client",
+            clientSecret: "refresh-secret"
+        },
+        tokenStore: new salesforce:InMemoryTokenStore(),
+        instanceUrl: "https://example.my.salesforce.com",
+        tenantId: "00Dtest"
+    };
+
+    PubSubTokenManager manager = new (connection);
+    string|error result = manager.getAccessToken();
+    test:assertTrue(result is error, "a non-JSON 2xx response must not be treated as a usable token");
+    if result is error {
+        string message = result.message();
+        test:assertTrue(message.includes("200"), "expected the real HTTP status to be in the error message, got: " + message);
     }
 }
 

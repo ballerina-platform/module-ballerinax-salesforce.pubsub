@@ -16,20 +16,29 @@
 
 import ballerina/http;
 import ballerina/lang.runtime;
+import ballerina/os;
 import ballerina/test;
 import ballerina/uuid;
 import ballerinax/salesforce;
 
-// The runner supplies these values only for an explicitly requested sandbox run.
-public configurable boolean pubsubSandboxTests = false;
-public configurable string sandboxEndpoint = "";
-public configurable string sandboxAccessToken = "";
-public configurable string sandboxClientId = "";
-public configurable string sandboxClientSecret = "";
-public configurable string sandboxRefreshUrl = "";
-public configurable string sandboxUsername = "";
-public configurable string sandboxPassword = "";
-public configurable string sandboxTenantId = "";
+// Match the existing Salesforce connector's CI convention: reusable workflows
+// expose protected org secrets directly as environment variables.
+public configurable string sandboxEndpoint = os:getEnv("EP_URL");
+public configurable string sandboxAccessToken = os:getEnv("ACCESS_TOKEN");
+public configurable string sandboxClientId = os:getEnv("CLIENT_ID");
+public configurable string sandboxClientSecret = os:getEnv("CLIENT_SECRET");
+public configurable string sandboxRefreshToken = os:getEnv("REFRESH_TOKEN");
+public configurable string sandboxRefreshUrl = os:getEnv("REFRESH_URL");
+public configurable string sandboxUsername = os:getEnv("SF_USERNAME");
+public configurable string sandboxPassword = os:getEnv("SF_PASSWORD");
+public configurable string sandboxTenantId = tenantIdFromSessionToken(sandboxAccessToken);
+public configurable boolean pubsubSandboxTests = sandboxEndpoint != "" && sandboxAccessToken != "" &&
+        sandboxClientId != "" && sandboxClientSecret != "" && sandboxRefreshUrl != "";
+
+function tenantIdFromSessionToken(string sessionToken) returns string {
+    int? separator = sessionToken.indexOf("!");
+    return separator is int ? sessionToken.substring(0, separator) : "";
+}
 
 final string SANDBOX_EVENT_TOPIC = "/event/Order_Notification__e";
 final string SANDBOX_CDC_TOPIC = "/data/ChangeEvents";

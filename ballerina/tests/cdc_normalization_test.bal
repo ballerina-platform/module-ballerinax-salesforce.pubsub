@@ -160,6 +160,40 @@ function testCdcNormalizationHandlesCreateChangeType() returns error? {
     test:assertEquals(metadata["changedFields"], ["Name", "Phone"]);
 }
 
+// Confirmed against real Salesforce CDC data: a CREATE event's changedFields
+// bitmap can come back completely empty even though the record has several
+// non-null field values -- every populated field on a new record must still
+// be treated as changed, falling back to the writer schema's own top-level
+// field list whenever the bitmap comes back empty. A field that is genuinely
+// absent (null) is still excluded. This fallback is intentionally gated on
+// bitmap-emptiness alone, not ChangeEventHeader.changeType -- see the comment
+// in normalizeCdcPayload for why changeType specifically isn't read here.
+@test:Config {}
+function testCdcNormalizationTreatsAllPopulatedFieldsAsChangedWhenBitmapIsEmpty() returns error? {
+    string schema = "{\"type\":\"record\",\"name\":\"AccountChangeEvent\",\"fields\":[" +
+        "{\"name\":\"ChangeEventHeader\",\"type\":{\"type\":\"record\",\"name\":\"Header\",\"fields\":[]}}," +
+        "{\"name\":\"Name\",\"type\":[\"null\",\"string\"]}," +
+        "{\"name\":\"Phone\",\"type\":[\"null\",\"string\"]}]}";
+    Payload raw = {
+        "ChangeEventHeader": {
+            "entityName": "Account",
+            "changeType": "CREATE",
+            "recordIds": ["001"],
+            "changedFields": [],
+            "nulledFields": [],
+            "diffFields": []
+        },
+        "Name": "Acme International",
+        "Phone": ()
+    };
+
+    Payload normalized = check normalizeCdcPayload(schema, raw);
+    map<anydata> changedData = check normalized["changedData"].ensureType();
+    map<anydata> metadata = check normalized["metadata"].ensureType();
+    test:assertEquals(changedData, {"Name": "Acme International"});
+    test:assertEquals(metadata["changedFields"], ["Name"]);
+}
+
 // A DELETE event typically carries no changed/nulled/diff field bitmaps at
 // all; normalization must produce empty changedData rather than erroring on
 // the absence of field-level data.

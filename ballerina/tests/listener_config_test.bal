@@ -42,8 +42,21 @@ function testListenerConfigAppliesServiceConfigAnnotation() {
         }
     };
 
-    [SubscriptionConfig, string?] [subscription, _] = subscriptionConfigFor(config.subscriptionConfig, annotatedService);
+    SubscriptionConfig subscription = subscriptionConfigFor(config, annotatedService);
     test:assertEquals(subscription.bufferSize, 20);
+}
+
+// This fails if a Listener's default reconnect budget is small enough that a
+// transient transport blip (UNAVAILABLE, a load balancer idle timeout, a
+// brief network partition) permanently stops delivery instead of reconnecting
+// through it -- a long-running Listener should only give up on a stream-level
+// failure a caller explicitly configured it to give up on.
+@test:Config {}
+function testDefaultSubscriptionConfigHasEffectivelyUnboundedReconnectBudget() {
+    SubscriptionConfig defaults = {};
+    test:assertTrue(defaults.reconnectRetry.maxRetries > 1000000,
+        "expected the default reconnect budget to be effectively unbounded, got: " +
+        defaults.reconnectRetry.maxRetries.toString());
 }
 
 // Listener construction must reject an empty listener-wide subscription
@@ -108,6 +121,26 @@ function testListenerAcceptsIndependentTopicAttachments() returns error? {
     });
     check endpoint.attach(newOrderService(), "/event/Order__e");
     check endpoint.attach(newOrderService(), "/data/AccountChangeEvent");
+}
+
+// This fails if attach() does not reassemble a compiler-supplied multi-segment
+// service path (as an array of path segments, the shape a declarative
+// `service /event/Order__e on listener` attachment actually supplies) into
+// the exact same topic key a programmatic, single-string attach() would use
+// for the equivalent topic.
+@test:Config {}
+function testListenerReassemblesMultiSegmentServicePathIntoTopic() returns error? {
+    Listener endpoint = check new ({
+        connection: {
+            auth: <http:BearerTokenConfig>{token: "ignored-in-test"},
+            instanceUrl: "https://acme.my.salesforce.com",
+            tenantId: "00D000000000001"
+        }
+    });
+
+    check endpoint.attach(newOrderService(), ["event", "Order__e"]);
+    error? duplicate = endpoint.attach(newOrderService(), "/event/Order__e");
+    test:assertTrue(duplicate is error, "expected the array-path and string-path forms to resolve to the same topic key");
 }
 
 // A Listener has no terminal diagnostic until a worker actually fails; callers

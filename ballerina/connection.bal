@@ -99,12 +99,29 @@ isolated function validateConnectionConfig(ConnectionConfig config) returns erro
     }
 }
 
-// Produces the transport configuration used for every owned gRPC channel.
-// Keeping this mapping in one place prevents Publisher and Listener from
-// diverging on TLS, proxy/pool, or timeout behavior.
+// Produces the transport configuration used for one-shot RPCs (Publish,
+// GetTopic, GetSchema outside a Listener's own channel). `connectionTimeout`
+// is an appropriate call deadline for these: each completes quickly or fails.
 isolated function grpcConfigFor(ConnectionConfig config) returns grpc:ClientConfiguration {
     grpc:ClientConfiguration transportConfig = config.grpcConfig.clone();
     transportConfig.timeout = config.connectionTimeout;
+    return transportConfig;
+}
+
+// A Subscribe stream can sit idle for long stretches between events with no
+// bytes flowing in either direction -- that is normal, healthy operation, not
+// a stall. `grpc:ClientConfiguration.timeout` (60s default) closes the whole
+// connection once that long since the last response, so applying
+// `connectionTimeout` (or the module default) the same way `grpcConfigFor`
+// does for one-shot RPCs would tear down a perfectly healthy long-lived
+// stream on every quiet period; this effectively disables it for the
+// Listener's channel instead, since liveness is judged by whether the stream
+// is still open, not by a fixed deadline on how long it may stay idle.
+final decimal STREAM_TIMEOUT_SECONDS = 31536000;
+
+isolated function grpcConfigForListener(ConnectionConfig config) returns grpc:ClientConfiguration {
+    grpc:ClientConfiguration transportConfig = config.grpcConfig.clone();
+    transportConfig.timeout = STREAM_TIMEOUT_SECONDS;
     return transportConfig;
 }
 

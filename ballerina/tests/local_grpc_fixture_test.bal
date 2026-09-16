@@ -733,10 +733,10 @@ function testListenerUsesLocalTlsGrpcFixture() returns error? {
     test:assertEquals(replayId, [7, 8, 9]);
 }
 
-// This fails if a declarative attach (no compiler-supplied service path)
-// cannot resolve its topic from @ServiceConfig, open its stream, decode an
-// event, and checkpoint it — proving the declarative path end-to-end rather
-// than just local topic resolution.
+// This fails if a declarative multi-segment `service /path on listener`
+// attachment cannot reassemble its topic from the compiler-supplied path
+// segments, open its stream, decode an event, and checkpoint it — proving
+// the declarative path end-to-end rather than just local topic resolution.
 @test:Config {}
 function testListenerAttachesDeclarativeServiceThroughLocalTlsGrpcFixture() returns error? {
     InMemoryReplayStore replayStore = new;
@@ -751,12 +751,18 @@ function testListenerAttachesDeclarativeServiceThroughLocalTlsGrpcFixture() retu
         replayStore,
         subscriptionConfig: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
     });
-    Service handler = @ServiceConfig {topic: FIXTURE_TOPIC} service object {
+    Service handler = service object {
         remote function onEvent(Event event) returns error? {
             test:assertEquals(event.payload["Message__c"], "streamed");
         }
     };
-    check endpoint.attach(handler);
+    // ["event", "Fixture__e"] is exactly the shape the compiler generates for
+    // a real `service /event/Fixture__e on endpoint { ... }` declaration
+    // (confirmed by disassembling a compiled minimal Ballerina program), so
+    // this exercises attach()'s multi-segment reassembly the same way that
+    // declarative sugar would, without depending on local (in-function)
+    // service-statement syntax, which does not support an absolute path.
+    check endpoint.attach(handler, ["event", "Fixture__e"]);
     check endpoint.'start();
     runtime:sleep(0.2);
     check endpoint.immediateStop();
@@ -785,16 +791,16 @@ function testListenerBindsTwoDeclarativeServicesToIndependentTopics() returns er
         replayStore,
         subscriptionConfig: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
     });
-    Service firstHandler = @ServiceConfig {topic: FIXTURE_TOPIC} service object {
+    Service firstHandler = service object {
         remote function onEvent(Event event) returns error? {
         }
     };
-    Service secondHandler = @ServiceConfig {topic: FIXTURE_MULTI_EVENT_TOPIC} service object {
+    Service secondHandler = service object {
         remote function onEvent(Event event) returns error? {
         }
     };
-    check endpoint.attach(firstHandler);
-    check endpoint.attach(secondHandler);
+    check endpoint.attach(firstHandler, ["event", "Fixture__e"]);
+    check endpoint.attach(secondHandler, ["event", "FixtureMultiEvent__e"]);
     check endpoint.'start();
     runtime:sleep(0.3);
     check endpoint.immediateStop();

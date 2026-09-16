@@ -29,10 +29,7 @@ listener pubsub:Listener events = check new ({
     }
 });
 
-@pubsub:ServiceConfig {
-    topic: "/event/Order_Notification__e"
-}
-service on events {
+service /event/Order_Notification__e on events {
     remote function onEvent(pubsub:Event event) returns error? {
         // Convert event.payload to the application record type when needed.
     }

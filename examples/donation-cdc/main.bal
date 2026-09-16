@@ -32,10 +32,7 @@ listener pubsub:Listener donationEvents = check new ({
 // The topic is a compile-time literal: point this at a differently named
 // object/channel by editing it directly in source. A deployment that needs
 // its topic chosen at runtime should use programmatic attach() instead.
-@pubsub:ServiceConfig {
-    topic: "/data/Donation__ChangeEvent"
-}
-service on donationEvents {
+service /data/Donation__ChangeEvent on donationEvents {
     remote function onEvent(pubsub:Event event) returns error? {
         // For /data/* topics, payload contains {changedData, metadata}.
         pubsub:Payload changedData = check event.payload["changedData"].ensureType();

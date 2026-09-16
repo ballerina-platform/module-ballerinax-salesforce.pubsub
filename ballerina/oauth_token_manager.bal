@@ -63,8 +63,17 @@ isolated class PubSubTokenManager {
             string storeKey = "salesforce.pubsub:" + auth.clientId;
             salesforce:TokenData? tokenData = check self.tokenStore.getTokenData(storeKey);
             if tokenData is salesforce:TokenData {
-                tokenData.accessTokenExpiryEpoch = 0;
-                check self.tokenStore.setTokenData(storeKey, tokenData);
+                // `getTokenData` can return a `readonly` value (the in-memory
+                // store's own copy), so the expiry is cleared by building a
+                // new record rather than mutating the retrieved one in place.
+                salesforce:TokenData expired = {
+                    accessToken: tokenData.accessToken,
+                    refreshToken: tokenData.refreshToken,
+                    accessTokenExpiryEpoch: 0,
+                    issuedAtEpoch: tokenData.issuedAtEpoch,
+                    lastRefreshedAtEpoch: tokenData.lastRefreshedAtEpoch
+                };
+                check self.tokenStore.setTokenData(storeKey, expired);
             }
             return;
         }
@@ -138,13 +147,36 @@ isolated function refreshWhileLocked(salesforce:TokenStore tokenStore, readonly 
     string body = "grant_type=refresh_token&refresh_token=" + encodedRefresh + "&client_id=" + encodedClientId +
             "&client_secret=" + encodedClientSecret;
     http:Response response = check tokenClient->post("", body, mediaType = "application/x-www-form-urlencoded");
-    json responseBody = check response.getJsonPayload();
+    // The body is read exactly once, as text, and reused for any JSON parsing
+    // that follows -- the response entity can't be read a second time via
+    // getJsonPayload() once its bytes have already been consumed by
+    // getTextPayload().
+    string|error rawBody = response.getTextPayload();
     if response.statusCode < 200 || response.statusCode >= 300 {
-        if responseBody is map<json> && responseBody.hasKey("error") && responseBody["error"] == "invalid_grant" {
+        // The response body is parsed from text, not via getJsonPayload(),
+        // because a misconfigured or unreachable token endpoint (wrong
+        // refreshUrl, a proxy/WAF block page, an HTML error page) is exactly
+        // the failure this needs to diagnose, and its body is often not JSON
+        // at all; getJsonPayload() on a non-JSON error body would itself
+        // throw a generic, statusless error that discards the real diagnostic.
+        json|error parsedBody = rawBody is string ? rawBody.fromJsonString() : rawBody;
+        if parsedBody is map<json> && parsedBody["error"] == "invalid_grant" {
             check tokenStore.clearTokenData(storeKey);
             return error("OAuth refresh token is no longer valid; re-authentication is required");
         }
-        return error("OAuth token request failed");
+        string detail = rawBody is string ? truncatedResponseDetail(rawBody) : "no readable response body";
+        return error("OAuth token request failed with status " + response.statusCode.toString() + ": " + detail);
+    }
+    json|error responseBody = rawBody is string ? rawBody.fromJsonString() : rawBody;
+    if responseBody is error {
+        // A 2xx status with a non-JSON body (a misconfigured refreshUrl that
+        // resolves to a login page or redirect target instead of the actual
+        // token endpoint) is just as diagnostically silent through
+        // getJsonPayload() as the non-2xx case above, so it gets the same
+        // status-plus-body treatment instead of the generic parse error.
+        string detail = rawBody is string ? truncatedResponseDetail(rawBody) : "no readable response body";
+        return error("OAuth token endpoint returned status " + response.statusCode.toString() +
+                " but the response body was not valid JSON: " + detail);
     }
     string accessToken = check (check responseBody.access_token).ensureType(string);
     string rotatedRefreshToken = refreshToken;
@@ -173,3 +205,8 @@ isolated function isUsable(salesforce:TokenData tokenData) returns boolean {
     [int, decimal] now = time:utcNow();
     return tokenData.accessToken.length() > 0 && tokenData.accessTokenExpiryEpoch > now[0];
 }
+
+final int MAX_RESPONSE_DETAIL_LENGTH = 200;
+
+isolated function truncatedResponseDetail(string text) returns string =>
+    text.length() > MAX_RESPONSE_DETAIL_LENGTH ? text.substring(0, MAX_RESPONSE_DETAIL_LENGTH) + "..." : text;

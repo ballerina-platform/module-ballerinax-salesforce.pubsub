@@ -1035,3 +1035,19 @@ form was compiled for the first time.
 - **Spec coverage:** `Listener` → `isolated class` (Task 4); `SubscriptionConfig.topic` (Task 1); `attach()` resolution rules including exact-match conflict and duplicate-topic retention (Tasks 2-3); `subscriptionConfigFor` split return (Task 2); Donation CDC declarative update — recreated since it didn't exist (Task 8); test plan's six bullets — one-topic no-path e2e (Task 5), two declarative topics independent (Task 5), missing/empty/duplicate/conflicting local rejection (Task 3), existing programmatic/flattened-config regression (Tasks 2-4 rerun full suite), Donation sample + example builds (Tasks 7-9).
 - **Placeholder scan:** every step carries literal code; the one open question (exact compiler-supplied path for a bare `service on`) is resolved empirically in Task 6 rather than assumed, per the plan's own stated uncertainty.
 - **Type consistency:** `subscriptionConfigFor` returns `[SubscriptionConfig, string?]` consistently across Tasks 2, 3, 5; `resolveAttachTopic`/`normalizedAttachTopic` names and signatures match between their Task 3 definition and all call sites.
+
+## Follow-up revert (same day)
+
+The annotation-carried `topic` (`ServiceSubscriptionConfig`) this plan built
+was itself reverted shortly after landing. The user's motivation for putting
+the topic in the annotation was to allow a *dynamic* (runtime-computed)
+topic; that goal was never achievable, since Ballerina annotation values must
+be compile-time constants — the same constraint applies to a declarative
+service's literal path. Declarative attachment now carries its topic through
+the service path instead (`service /event/X on listener`), with `attach()`
+extended to reassemble the `string[]` of path segments Ballerina supplies for
+a multi-segment absolute path (confirmed empirically, not assumed) back into
+one topic string. `@ServiceConfig` reverted to plain `SubscriptionConfig`
+(no topic field), matching its pre-this-session shape exactly. See
+`/Users/gayaldassanayake/.claude/plans/resilient-floating-squirrel.md` for
+the full revert plan.

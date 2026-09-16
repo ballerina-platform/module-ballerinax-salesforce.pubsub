@@ -29,10 +29,7 @@ listener pubsub:Listener events = check new ({
     }
 });
 
-@pubsub:ServiceConfig {
-    topic: "/data/ChangeEvents"
-}
-service on events {
+service /data/ChangeEvents on events {
     remote function onEvent(pubsub:Event event) returns error? {
         // For /data/* topics, payload contains {changedData, metadata}.
         pubsub:Payload changedData = check event.payload["changedData"].ensureType();

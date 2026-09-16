@@ -15,7 +15,12 @@
 // under the License.
 
 # A dynamically decoded Avro event body. Salesforce schemas are retrieved at
-# runtime, so applications own any conversion to a static record type.
+# runtime, so applications own any conversion to a static record type. Some
+# decoded values (observed with a Currency field) have a runtime
+# representation that the standard toString conversion cannot render and
+# throws an uncatchable panic instead of an `error`; avoid calling toString
+# (directly, or via `io:println`) on a `Payload` or its values -- convert via
+# `cloneWithType` to a static record first.
 public type Payload record {};
 
 # A binary-safe event header. An array is used in Event to preserve repeated
@@ -92,8 +97,13 @@ public type SubscriptionConfig record {|
     int bufferSize = 10;
     # Retry configuration for handler failures.
     RetryPolicy handlerRetry = {};
-    # Retry configuration for reconnectable stream failures.
-    RetryPolicy reconnectRetry = {};
+    # Retry configuration for reconnectable stream failures (a transient
+    # `UNAVAILABLE`, `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`, or `ABORTED`
+    # status, or a normal stream close). Defaults to an effectively unbounded
+    # budget, since a long-running Listener should keep reconnecting with
+    # capped backoff through transport blips rather than terminate and stop
+    # delivering events; pass a smaller `maxRetries` to fail fast instead.
+    RetryPolicy reconnectRetry = {maxRetries: 2147483647};
 |};
 
 # Publisher construction settings for one canonical Salesforce topic.
@@ -136,21 +146,11 @@ public type Service service object {
     remote function onEvent(Event event) returns error?;
 };
 
-# Per-service override of `ListenerConfig.subscriptionConfig`, plus the
-# canonical topic for a declarative `service on listener` attachment (no
-# service path). Presence of this annotation replaces the entire effective
+# Per-service override of `ListenerConfig.subscriptionConfig` for one attached
+# topic. Presence of this annotation replaces the entire effective
 # `SubscriptionConfig` for that topic; fields the annotation omits take
 # `SubscriptionConfig`'s own defaults, not `subscriptionConfig`'s values.
-public type ServiceSubscriptionConfig record {|
-    *SubscriptionConfig;
-    # Canonical Salesforce topic. Required when this annotation is the only
-    # topic source (declarative attachment); optional, and cross-checked for
-    # an exact match, when attach() is also given a topic programmatically.
-    string? topic = ();
-|};
-
-# Attach as `@pubsub:ServiceConfig` on a service declaration.
-public annotation ServiceSubscriptionConfig ServiceConfig on service;
+public annotation SubscriptionConfig ServiceConfig on service;
 
 # Privacy-safe terminal listener failure context.
 public type ListenerError record {|

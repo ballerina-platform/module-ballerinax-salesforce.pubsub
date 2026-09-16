@@ -35,32 +35,17 @@ function waitForWorker(future<error?> workerFuture, decimal timeoutSeconds) retu
     return result;
 }
 
-// A literal "/" is grammar for a pathless `service on listener` declaration
-// on some Ballerina versions, never a real Salesforce topic, so it is
-// normalized away exactly like an absent or empty path.
-isolated function normalizedAttachTopic(string? candidate) returns string? =>
-    candidate is string && candidate.length() > 0 && candidate != "/" ? candidate : ();
-
-// Combines the compiler-supplied service path with the service's
-// `@ServiceConfig.topic`, if any. Exactly one non-empty source is required;
-// two non-empty sources must agree.
-isolated function resolveAttachTopic(string? servicePath, string? annotationTopic) returns string|error {
-    string? path = normalizedAttachTopic(servicePath);
-    string? annotated = normalizedAttachTopic(annotationTopic);
-    if path is string && annotated is string {
-        if path != annotated {
-            return error("attach() topic '" + path + "' conflicts with @ServiceConfig topic '" + annotated + "'");
-        }
-        return path;
+// Reassembles the path segments the compiler supplies for a multi-segment
+// declarative `service /event/X on listener` declaration back into one
+// canonical topic string. Confirmed empirically (not assumed): the compiler
+// passes each segment separately with no leading empty segment for the root
+// `/` and no `/` characters embedded in an element.
+isolated function joinAttachPathSegments(string[] segments) returns string {
+    string joined = "";
+    foreach string segment in segments {
+        joined += "/" + segment;
     }
-    if path is string {
-        return path;
-    }
-    if annotated is string {
-        return annotated;
-    }
-    return error("a Listener service needs one canonical topic: pass it to attach(), " +
-            "or annotate the service with @ServiceConfig { topic: \"...\" } for declarative attachment");
+    return joined;
 }
 
 type ActiveSubscription record {|
@@ -129,22 +114,30 @@ public class Listener {
     }
 
     # Registers a service for its canonical Salesforce topic. The compiler
-    # supplies the service path as `name` for `service "..." on listener`; a
-    # declarative `service on listener` (no path) resolves the topic from the
-    # service's `@ServiceConfig.topic` instead.
+    # supplies the service path as `name` for `service "..." on listener`,
+    # including a declarative `service /event/X on listener` declaration —
+    # a multi-segment absolute path arrives as its individual segments,
+    # reassembled here into one canonical topic string.
     #
     # + s - service with a remote `onEvent` method
-    # + name - canonical Salesforce topic path, when supplied programmatically
-    # + return - an error for a missing, empty, or conflicting topic, a
-    #   duplicate topic, or an invalid effective subscription configuration,
-    #   including one supplied by a @ServiceConfig annotation
+    # + name - canonical Salesforce topic path
+    # + return - an error for an invalid or duplicate topic, or an invalid
+    #   effective subscription configuration, including one supplied by a
+    #   @ServiceConfig annotation
     public function attach(Service s, string[]|string? name = ()) returns error? {
+        string topic;
         if name is string[] {
+            if name.length() == 0 {
+                return error("Listener service path must be one canonical topic string");
+            }
+            topic = joinAttachPathSegments(name);
+        } else if name is string && name.length() > 0 {
+            topic = name;
+        } else {
             return error("Listener service path must be one canonical topic string");
         }
-        [SubscriptionConfig, string?] [resolvedConfig, annotationTopic] = subscriptionConfigFor(self.config.subscriptionConfig, s);
+        SubscriptionConfig resolvedConfig = subscriptionConfigFor(self.config, s);
         check validateSubscriptionConfig(resolvedConfig);
-        string topic = check resolveAttachTopic(name, annotationTopic);
         if self.services.hasKey(topic) {
             return error("a service is already attached for topic " + topic);
         }
@@ -276,7 +269,7 @@ public class Listener {
         if !topicInfo.can_subscribe {
             return error("topic does not support subscribing");
         }
-        [SubscriptionConfig, string?] [resolvedConfig, _] = subscriptionConfigFor(self.config.subscriptionConfig, attachedService);
+        SubscriptionConfig resolvedConfig = subscriptionConfigFor(self.config, attachedService);
         ReplayKey replayKey = {
             tenantId: self.config.connection.tenantId,
             topic,
@@ -284,15 +277,22 @@ public class Listener {
         };
         FlowController flow = check new (resolvedConfig.bufferSize);
         int initialCredit = check flow.initialRequest();
+        // A dedicated channel for the Subscribe call itself: it must tolerate
+        // sitting idle between events for arbitrarily long stretches (see
+        // grpcConfigForListener), which is the wrong timeout for GetTopic
+        // above -- sharing one client between both would let a transient
+        // GetTopic connection issue hang for as long as the stream is allowed
+        // to idle, instead of failing fast and letting the caller retry.
+        wire:PubSubClient streamGrpcClient = check new (self.config.connection.endpoint, grpcConfigForListener(self.config.connection));
         string streamToken = check self.tokenManager.getAccessToken();
         map<string|string[]> streamHeaders = check metadataForIdentity(connectionIdentityFor(self.config.connection), streamToken);
-        wire:SubscribeStreamingClient|error streamResult = grpcClient->SubscribeContext(streamHeaders);
+        wire:SubscribeStreamingClient|error streamResult = streamGrpcClient->SubscribeContext(streamHeaders);
         if streamResult is error && grpcStatusNameOf(streamResult) == "UNAUTHENTICATED" {
             check self.tokenManager.invalidateAccessToken();
             string refreshedStreamToken = check self.tokenManager.getAccessToken();
             map<string|string[]> refreshedStreamHeaders = check metadataForIdentity(
                 connectionIdentityFor(self.config.connection), refreshedStreamToken);
-            streamResult = grpcClient->SubscribeContext(refreshedStreamHeaders);
+            streamResult = streamGrpcClient->SubscribeContext(refreshedStreamHeaders);
         }
         wire:SubscribeStreamingClient streamClient = check streamResult;
         wire:FetchRequest fetchRequest;

@@ -33,10 +33,7 @@ listener pubsub:Listener events = check new ({
 // Each declaratively attached topic gets its own independent stream, cursor,
 // and sequential delivery; a slow or stuck handler on one topic never blocks
 // the other's progress.
-@pubsub:ServiceConfig {
-    topic: "/event/Order_Notification__e"
-}
-service on events {
+service /event/Order_Notification__e on events {
     remote function onEvent(pubsub:Event event) returns error? {
         // Convert event.payload to the application record type when needed.
     }
@@ -51,10 +48,7 @@ service on events {
 }
 
 // A service is not required to define onError; onEvent alone is valid.
-@pubsub:ServiceConfig {
-    topic: "/event/Shipment_Notification__e"
-}
-service on events {
+service /event/Shipment_Notification__e on events {
     remote function onEvent(pubsub:Event event) returns error? {
         // Convert event.payload to the application record type when needed.
     }

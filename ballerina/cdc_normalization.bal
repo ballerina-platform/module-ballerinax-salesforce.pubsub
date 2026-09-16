@@ -39,6 +39,29 @@ isolated function normalizeCdcPayload(string schemaJson, Payload payload) return
     string[] nulledFields = check expandCdcBitmap(headerValue["nulledFields"], schemaIndex);
     string[] diffFields = check expandCdcBitmap(headerValue["diffFields"], schemaIndex);
 
+    // Salesforce does not always populate the changedFields bitmap (confirmed
+    // against real CDC data: a CREATE event with several non-null field
+    // values still reported a completely empty bitmap) -- every populated
+    // field on a new record is "changed" by definition, so this falls back to
+    // treating every non-null top-level field as changed. Gated on the header
+    // actually carrying a changeType key (true for every genuine Salesforce
+    // CDC header) rather than reading that field's value: doing so triggers a
+    // reproducible hang in the connector's Avro decode path (unlike the
+    // sibling array fields changedFields/nulledFields/diffFields, which read
+    // fine), and a bare `hasKey` never touches the value at all. Without this
+    // guard the fallback would also wrongly fire for any payload whose header
+    // simply omits changedFields outside the CDC bitmap convention entirely.
+    if changedFields.length() == 0 && headerValue.hasKey("changeType") {
+        foreach string fieldName in schemaIndex.topLevelFields {
+            if fieldName == "ChangeEventHeader" {
+                continue;
+            }
+            if payload[fieldName] !is () {
+                changedFields.push(fieldName);
+            }
+        }
+    }
+
     map<anydata> changedData = {};
     foreach string path in changedFields {
         check addChangedValue(changedData, payload, path);
