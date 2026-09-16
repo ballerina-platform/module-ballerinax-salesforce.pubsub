@@ -409,13 +409,13 @@ modules = [
 
 [[package]]
 org = "example"
-name = "salesforce_pubsub_listen"
+name = "salesforce_pubsub_donation_cdc"
 version = "0.1.0"
 dependencies = [
 	{org = "ballerina", name = "http"},
 	{org = "ballerinax", name = "salesforce.pubsub"}
 ]
 modules = [
-	{org = "example", packageName = "salesforce_pubsub_listen", moduleName = "salesforce_pubsub_listen"}
+	{org = "example", packageName = "salesforce_pubsub_donation_cdc", moduleName = "salesforce_pubsub_donation_cdc"}
 ]
 

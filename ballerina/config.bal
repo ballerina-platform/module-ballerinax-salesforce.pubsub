@@ -14,18 +14,32 @@
 // specific language governing permissions and limitations
 // under the License.
 
-# Resolves one attached service's effective delivery configuration. Presence of
-# a @ServiceConfig annotation on the service replaces the listener's
-# subscriptionConfig wholesale for that topic; absence falls back to
-# subscriptionConfig.
+# Resolves one attached service's effective delivery configuration and its
+# `@ServiceConfig` annotation topic, if any. Presence of a @ServiceConfig
+# annotation on the service replaces the listener's subscriptionConfig
+# wholesale for that topic; absence falls back to the listener-wide default
+# with no annotation topic.
 #
-# + config - listener-wide configuration
+# + defaultConfig - `ListenerConfig.subscriptionConfig`, used when the service
+#   carries no @ServiceConfig annotation
 # + attachedService - the service value passed to Listener.attach()
-# + return - effective topic delivery configuration
-public isolated function subscriptionConfigFor(ListenerConfig config, Service attachedService) returns SubscriptionConfig {
+# + return - effective topic delivery configuration, and the annotation's
+#   topic when the service carries a @ServiceConfig annotation that set one
+public isolated function subscriptionConfigFor(SubscriptionConfig defaultConfig, Service attachedService)
+        returns [SubscriptionConfig, string?] {
     typedesc<Service> serviceType = typeof attachedService;
-    SubscriptionConfig? override = serviceType.@ServiceConfig;
-    return override ?: config.subscriptionConfig;
+    ServiceSubscriptionConfig? override = serviceType.@ServiceConfig;
+    if override is ServiceSubscriptionConfig {
+        SubscriptionConfig effective = {
+            initialReplay: override.initialReplay,
+            expiredReplayRecovery: override.expiredReplayRecovery,
+            bufferSize: override.bufferSize,
+            handlerRetry: override.handlerRetry,
+            reconnectRetry: override.reconnectRetry
+        };
+        return [effective, override.topic];
+    }
+    return [defaultConfig, ()];
 }
 
 # Validates Listener configuration before a service is attached or transport is

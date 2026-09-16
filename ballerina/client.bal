@@ -35,6 +35,34 @@ function waitForWorker(future<error?> workerFuture, decimal timeoutSeconds) retu
     return result;
 }
 
+// A literal "/" is grammar for a pathless `service on listener` declaration
+// on some Ballerina versions, never a real Salesforce topic, so it is
+// normalized away exactly like an absent or empty path.
+isolated function normalizedAttachTopic(string? candidate) returns string? =>
+    candidate is string && candidate.length() > 0 && candidate != "/" ? candidate : ();
+
+// Combines the compiler-supplied service path with the service's
+// `@ServiceConfig.topic`, if any. Exactly one non-empty source is required;
+// two non-empty sources must agree.
+isolated function resolveAttachTopic(string? servicePath, string? annotationTopic) returns string|error {
+    string? path = normalizedAttachTopic(servicePath);
+    string? annotated = normalizedAttachTopic(annotationTopic);
+    if path is string && annotated is string {
+        if path != annotated {
+            return error("attach() topic '" + path + "' conflicts with @ServiceConfig topic '" + annotated + "'");
+        }
+        return path;
+    }
+    if path is string {
+        return path;
+    }
+    if annotated is string {
+        return annotated;
+    }
+    return error("a Listener service needs one canonical topic: pass it to attach(), " +
+            "or annotate the service with @ServiceConfig { topic: \"...\" } for declarative attachment");
+}
+
 type ActiveSubscription record {|
     wire:SubscribeStreamingClient streamClient;
     FlowController flow;
@@ -101,23 +129,42 @@ public class Listener {
     }
 
     # Registers a service for its canonical Salesforce topic. The compiler
-    # supplies the service path as `name` for `service "..." on listener`.
+    # supplies the service path as `name` for `service "..." on listener`; a
+    # declarative `service on listener` (no path) resolves the topic from the
+    # service's `@ServiceConfig.topic` instead.
     #
     # + s - service with a remote `onEvent` method
-    # + name - canonical Salesforce topic path
-    # + return - an error for an invalid or duplicate topic, or an invalid
-    #   effective subscription configuration, including one supplied by a
-    #   @ServiceConfig annotation
+    # + name - canonical Salesforce topic path, when supplied programmatically
+    # + return - an error for a missing, empty, or conflicting topic, a
+    #   duplicate topic, or an invalid effective subscription configuration,
+    #   including one supplied by a @ServiceConfig annotation
     public function attach(Service s, string[]|string? name = ()) returns error? {
-        if name !is string || name.length() == 0 {
+        if name is string[] {
             return error("Listener service path must be one canonical topic string");
         }
-        SubscriptionConfig resolvedConfig = subscriptionConfigFor(self.config, s);
+        [SubscriptionConfig, string?] [resolvedConfig, annotationTopic] = subscriptionConfigFor(self.config.subscriptionConfig, s);
         check validateSubscriptionConfig(resolvedConfig);
-        if self.services.hasKey(name) {
-            return error("a service is already attached for topic " + name);
+        string topic = check resolveAttachTopic(name, annotationTopic);
+        if self.services.hasKey(topic) {
+            return error("a service is already attached for topic " + topic);
         }
-        self.services[name] = s;
+        self.services[topic] = s;
+    }
+
+    # Detaches a service that was previously attached with attach(). A no-op
+    # when the service is not currently attached. Detaching a topic whose
+    # stream is already running is not supported in V1; call this only before
+    # 'start().
+    #
+    # + s - the service value previously passed to attach()
+    # + return - always `()` in V1
+    public function detach(Service s) returns error? {
+        foreach var [topic, attachedService] in self.services.entries() {
+            if attachedService === s {
+                _ = self.services.remove(topic);
+                return;
+            }
+        }
     }
 
     # Opens an independent authenticated Subscribe stream for every attached
@@ -229,7 +276,7 @@ public class Listener {
         if !topicInfo.can_subscribe {
             return error("topic does not support subscribing");
         }
-        SubscriptionConfig resolvedConfig = subscriptionConfigFor(self.config, attachedService);
+        [SubscriptionConfig, string?] [resolvedConfig, _] = subscriptionConfigFor(self.config.subscriptionConfig, attachedService);
         ReplayKey replayKey = {
             tenantId: self.config.connection.tenantId,
             topic,

@@ -42,7 +42,7 @@ function testListenerConfigAppliesServiceConfigAnnotation() {
         }
     };
 
-    SubscriptionConfig subscription = subscriptionConfigFor(config, annotatedService);
+    [SubscriptionConfig, string?] [subscription, _] = subscriptionConfigFor(config.subscriptionConfig, annotatedService);
     test:assertEquals(subscription.bufferSize, 20);
 }
 

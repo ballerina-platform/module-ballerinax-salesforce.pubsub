@@ -733,6 +733,82 @@ function testListenerUsesLocalTlsGrpcFixture() returns error? {
     test:assertEquals(replayId, [7, 8, 9]);
 }
 
+// This fails if a declarative attach (no compiler-supplied service path)
+// cannot resolve its topic from @ServiceConfig, open its stream, decode an
+// event, and checkpoint it — proving the declarative path end-to-end rather
+// than just local topic resolution.
+@test:Config {}
+function testListenerAttachesDeclarativeServiceThroughLocalTlsGrpcFixture() returns error? {
+    InMemoryReplayStore replayStore = new;
+    Listener endpoint = check new ({
+        connection: {
+            auth: <http:BearerTokenConfig>{token: "fixture-token"},
+            instanceUrl: "https://fixture.my.salesforce.com",
+            tenantId: "00DFixture000001",
+            endpoint: "https://localhost:" + FIXTURE_PORT.toString(),
+            grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
+        },
+        replayStore,
+        subscriptionConfig: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
+    });
+    Service handler = @ServiceConfig {topic: FIXTURE_TOPIC} service object {
+        remote function onEvent(Event event) returns error? {
+            test:assertEquals(event.payload["Message__c"], "streamed");
+        }
+    };
+    check endpoint.attach(handler);
+    check endpoint.'start();
+    runtime:sleep(0.2);
+    check endpoint.immediateStop();
+    byte[]? replayId = check replayStore.load({
+        tenantId: "00DFixture000001",
+        topic: FIXTURE_TOPIC,
+        subscriptionName: "default"
+    });
+    test:assertEquals(replayId, [7, 8, 9]);
+}
+
+// This fails if two declaratively-attached services on one Listener do not
+// resolve to two fully independent topic subscriptions (separate streams,
+// separate checkpoints).
+@test:Config {}
+function testListenerBindsTwoDeclarativeServicesToIndependentTopics() returns error? {
+    InMemoryReplayStore replayStore = new;
+    Listener endpoint = check new ({
+        connection: {
+            auth: <http:BearerTokenConfig>{token: "fixture-token"},
+            instanceUrl: "https://fixture.my.salesforce.com",
+            tenantId: "00DFixture000001",
+            endpoint: "https://localhost:" + FIXTURE_PORT.toString(),
+            grpcConfig: {secureSocket: {cert: "tests/resources/local-grpc.crt"}}
+        },
+        replayStore,
+        subscriptionConfig: {handlerRetry: {maxRetries: 0}, reconnectRetry: {maxRetries: 0}}
+    });
+    Service firstHandler = @ServiceConfig {topic: FIXTURE_TOPIC} service object {
+        remote function onEvent(Event event) returns error? {
+        }
+    };
+    Service secondHandler = @ServiceConfig {topic: FIXTURE_MULTI_EVENT_TOPIC} service object {
+        remote function onEvent(Event event) returns error? {
+        }
+    };
+    check endpoint.attach(firstHandler);
+    check endpoint.attach(secondHandler);
+    check endpoint.'start();
+    runtime:sleep(0.3);
+    check endpoint.immediateStop();
+
+    byte[]? firstReplay = check replayStore.load({
+        tenantId: "00DFixture000001", topic: FIXTURE_TOPIC, subscriptionName: "default"
+    });
+    byte[]? secondReplay = check replayStore.load({
+        tenantId: "00DFixture000001", topic: FIXTURE_MULTI_EVENT_TOPIC, subscriptionName: "default"
+    });
+    test:assertEquals(firstReplay, [7, 8, 9]);
+    test:assertTrue(secondReplay is byte[], "expected the second declarative topic to have its own checkpoint");
+}
+
 // This fails if gracefulStop does not bound its wait for a topic worker that
 // is genuinely still blocked (here, in a pending receive on a stream that
 // stays open with no further events) to roughly the connector-owned

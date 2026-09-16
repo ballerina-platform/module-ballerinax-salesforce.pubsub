@@ -136,11 +136,21 @@ public type Service service object {
     remote function onEvent(Event event) returns error?;
 };
 
-# Per-service override of `ListenerConfig.subscriptionConfig` for one attached
-# topic. Presence of this annotation replaces the entire effective
+# Per-service override of `ListenerConfig.subscriptionConfig`, plus the
+# canonical topic for a declarative `service on listener` attachment (no
+# service path). Presence of this annotation replaces the entire effective
 # `SubscriptionConfig` for that topic; fields the annotation omits take
 # `SubscriptionConfig`'s own defaults, not `subscriptionConfig`'s values.
-public annotation SubscriptionConfig ServiceConfig on service;
+public type ServiceSubscriptionConfig record {|
+    *SubscriptionConfig;
+    # Canonical Salesforce topic. Required when this annotation is the only
+    # topic source (declarative attachment); optional, and cross-checked for
+    # an exact match, when attach() is also given a topic programmatically.
+    string? topic = ();
+|};
+
+# Attach as `@pubsub:ServiceConfig` on a service declaration.
+public annotation ServiceSubscriptionConfig ServiceConfig on service;
 
 # Privacy-safe terminal listener failure context.
 public type ListenerError record {|

@@ -1,9 +1,12 @@
 # Salesforce Pub/Sub examples
 
 - [`publish`](publish): publishes a platform event through a topic-bound Publisher.
-- [`listen`](listen): attaches a sequential listener service for one platform event topic.
+- [`listen`](listen): declares a listener service for one platform event topic.
 - [`cdc`](cdc): consumes Change Data Capture events with normalized changed data and metadata.
-- [`multi-topic`](multi-topic): attaches two independent topics to one Listener, one with an optional `onError` callback and one without.
+- [`multi-topic`](multi-topic): declares two independent topics on one Listener, one with an optional `onError` callback and one without.
+- [`donation-cdc`](donation-cdc): a standalone Donation CDC listener with its topic as a compile-time literal; change it directly in source for a differently named object/channel.
+
+`listen`, `cdc`, `multi-topic`, and `donation-cdc` use the declarative form: a `service on listener` declaration with its topic supplied by `@pubsub:ServiceConfig { topic: "..." }`. The programmatic form (`check listener.attach(service, "/event/Topic__e")`) remains available and is the right choice when the topic is only known at runtime.
 
 Provide `accessToken`, `instanceUrl`, and `tenantId` through Ballerina configuration before running any example. `tenantId` is the Salesforce org ID, not the user ID returned by the OAuth identity endpoint. For example, create an uncommitted `Config.toml` in an example directory:
 
