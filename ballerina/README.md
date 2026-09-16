@@ -9,9 +9,3 @@
 ## Quickstart
 
 [//]: # (TODO: Add a quickstart guide to demonstrate a basic functionality of the module, including sample code snippets.)
-
-## Examples
-
-The `Salesforce Pub/Sub connector` connector provides practical examples illustrating usage in various scenarios. Explore these [examples](https://github.com/module-ballerinax-salesforce.pubsub/tree/main/examples/), covering the following use cases:
-
-[//]: # (TODO: Add examples)

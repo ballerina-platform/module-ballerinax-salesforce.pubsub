@@ -119,7 +119,7 @@ check events.'start();
 
 Without a checkpoint, a topic starts at `LATEST`. An expired checkpoint recovers from `EARLIEST` by default. Because an application side effect and checkpoint save are not atomic, an event can be redelivered after a crash; consumers must make side effects idempotent. The default buffer size is 10, and outstanding protocol request credit never exceeds Salesforce's own maximum of 100.
 
-A Listener may have several topics attached -- declaratively, programmatically, or a mix of both -- each with its own independent stream, cursor, and delivery progress -- a slow handler on one topic never blocks another's progress. However, failure handling is listener-wide, not per-topic: once one topic exhausts its retry budget or hits a terminal (non-retryable) error, the whole Listener stops every attached topic's stream, not just the failing one. A service may optionally define `remote function onError(pubsub:ListenerError err) returns error?`; the Listener invokes it on every attached service that defines it (a service with only `onEvent` remains valid) before it finishes stopping. `getLastError()` returns the terminal diagnostic afterward, including which topic and operation failed. See the [multi-topic example](examples/multi-topic) for both an `onError`-aware and a plain `onEvent`-only service attached side by side.
+A Listener may have several topics attached -- declaratively, programmatically, or a mix of both -- each with its own independent stream, cursor, and delivery progress -- a slow handler on one topic never blocks another's progress. However, failure handling is listener-wide, not per-topic: once one topic exhausts its retry budget or hits a terminal (non-retryable) error, the whole Listener stops every attached topic's stream, not just the failing one. A service may optionally define `remote function onError(pubsub:ListenerError err) returns error?`; the Listener invokes it on every attached service that defines it (a service with only `onEvent` remains valid) before it finishes stopping. `getLastError()` returns the terminal diagnostic afterward, including which topic and operation failed.
 
 The connector never exits the application process on any failure, including retry exhaustion or a terminal Listener error; it only stops its own streams. Restarting the process, supervising the Listener, and deciding whether/when to restart it (for example under Kubernetes pod replacement) are all the application's responsibility, not the connector's. Restarting with the default `InMemoryReplayStore` starts every topic without its prior checkpoint (`LATEST`, or `CUSTOM` only if you seed one), since that store's state does not survive the process; supply a durable `ReplayStore` implementation if a restart must resume from the last saved position.
 
@@ -130,8 +130,7 @@ bitmaps before it invokes `onEvent`. The body has `changedData` and `metadata`
 fields: `changedData` contains changed values, including explicit nulls, while
 metadata retains the header and exposes `changedFields`, `nulledFields`, and
 `diffFields` as field names. Standard platform and real-time event payloads
-remain dynamic Avro-decoded `Payload` values. See the [CDC listener
-example](examples/cdc) for a starting point.
+remain dynamic Avro-decoded `Payload` values.
 
 ## Build and test
 
@@ -154,13 +153,24 @@ The repository Gradle build uses Docker for Ballerina packaging:
 
 ### Shared-org sandbox tests
 
-Sandbox tests follow the existing Salesforce connector convention and read
-`EP_URL`, `ACCESS_TOKEN`, `CLIENT_ID`, `CLIENT_SECRET`, `REFRESH_TOKEN`,
-`REFRESH_URL`, `SF_USERNAME`, and `SF_PASSWORD` directly from the environment.
-They are enabled only when the required Salesforce credentials are present.
-The reusable CI workflows inherit the existing protected org secrets; no
-additional workflow or credential file is required. The suite uses unique
-correlation IDs; platform events are intentionally not deleted. Account CDC
-coverage creates and deletes only its own uniquely named Account.
+The live shared-org suite is disabled by default. To run it locally, set
+`PUBSUB_SANDBOX_TESTS=true` together with `EP_URL`, `CLIENT_ID`,
+`CLIENT_SECRET`, `REFRESH_TOKEN`, `REFRESH_URL`, and `SF_TENANT_ID`.
+It uses refresh-token OAuth for both REST Account mutations and Pub/Sub API
+subscriptions, so it does not depend on an expiring `ACCESS_TOKEN` secret.
 
-See [examples](examples/README.md) for standalone publish and listener source.
+Run only the live groups with:
+
+```bash
+./gradlew :salesforce.pubsub-ballerina:sandboxTest
+```
+
+Trusted upstream pull requests, branch builds, and daily builds set the flag
+and credentials automatically. Fork pull requests do not run the live job.
+The suite uses `GITHUB_RUN_ID` as its cleanup scope in CI; set
+`PUBSUB_SANDBOX_RUN_ID` when rerunning a local interrupted suite to sweep that
+run's stale Accounts before tests begin. The CDC scenarios use unique
+correlation IDs and delete their own Accounts;
+platform events are retained only for Salesforce's normal event-retention
+period because they cannot be explicitly deleted.
+
