@@ -90,6 +90,14 @@ subprojects {
         ballerinaStdLibs "io.ballerina.stdlib:observe-ballerina:${observeVersion}"
         ballerinaStdLibs "io.ballerina:observe-ballerina:${observeInternalVersion}"
         ballerinaStdLibs "io.ballerina.lib:data.jsondata-ballerina:${stdlibDataJsonDataVersion}"
+
+        // Direct connector dependencies (not part of the Ballerina distribution's
+        // own standard library), staged locally for the same reason as the
+        // stdlib artifacts above: `bal build`/`bal test` then resolve them from
+        // this pre-seeded local copy instead of requiring a live Ballerina
+        // Central call, which is what was intermittently failing in CI.
+        ballerinaStdLibs "io.ballerina.lib:salesforce-ballerina:${salesforceVersion}"
+        ballerinaStdLibs "io.ballerina.lib:avro-ballerina:${avroVersion}"
     }
 }
 
