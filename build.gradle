@@ -98,6 +98,7 @@ subprojects {
         // Central call, which is what was intermittently failing in CI.
         ballerinaStdLibs "io.ballerina.lib:salesforce-ballerina:${salesforceVersion}"
         ballerinaStdLibs "io.ballerina.lib:avro-ballerina:${avroVersion}"
+        ballerinaStdLibs "io.ballerina.stdlib:protobuf-ballerina:${stdlibProtobufVersion}"
     }
 }
 
