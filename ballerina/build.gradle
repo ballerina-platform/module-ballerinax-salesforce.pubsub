@@ -47,16 +47,8 @@ def stripBallerinaExtensionVersion(String extVersion) {
 ballerina {
     packageOrganization = packageOrg
     module = packageName
-    // Use the distribution pinned in gradle.properties for every Gradle test
-    // run. Docker is not required to execute Ballerina or to reach Salesforce.
     langVersion = ballerinaLangVersion
-    // Instrumented coverage intermittently prevents callbacks from the local
-    // bidirectional gRPC fixture from reaching Listener services. Match the
-    // Solace connector's direct-test configuration and run these tests without
-    // Ballerina coverage instrumentation.
     testCoverageParam = ""
-    // Matches the direct Gradle-managed test runner used by similar connector
-    // modules such as Solace. Packaging metadata remains in Ballerina.toml.
     isConnector = false
     platform = "java21"
 }
@@ -69,9 +61,6 @@ task updateTomlFiles {
     }
 }
 
-// Resolve the Ballerina package graph with the same U12 toolchain Gradle uses
-// for tests. This prevents a developer's newer host distribution from leaving
-// an incompatible Dependencies.toml in the workspace.
 task resolveBallerinaDependencies(type: Exec) {
     dependsOn unpackJballerinaTools
     dependsOn copyStdlibs
