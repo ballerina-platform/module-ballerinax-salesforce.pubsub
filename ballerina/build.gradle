@@ -50,7 +50,7 @@ ballerina {
     langVersion = ballerinaLangVersion
     testCoverageParam = ""
     isConnector = false
-    platform = "java21"
+    platform = "any"
 }
 
 task updateTomlFiles {
