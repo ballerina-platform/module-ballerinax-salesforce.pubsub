@@ -160,6 +160,25 @@ function drainFixtureRequests(stream<wire:FetchRequest, grpc:Error?> requests) {
     }
 }
 
+// Polls `condition` until it becomes true or `timeoutSeconds` elapses, in
+// place of a fixed sleep before asserting on a Listener's background
+// worker delivering or checkpointing an event. A fixed sleep either wastes
+// time when delivery is fast or, on a loaded CI runner, isn't long enough
+// and produces a flaky failure unrelated to any real bug; this returns as
+// soon as the awaited state is actually reached, and only errors out if it
+// genuinely never arrives within the bound.
+function waitUntil(function() returns boolean condition, decimal timeoutSeconds = 5) returns error? {
+    decimal waited = 0;
+    decimal interval = 0.02;
+    while !condition() {
+        if waited >= timeoutSeconds {
+            return error("condition was not met within " + timeoutSeconds.toString() + "s");
+        }
+        runtime:sleep(interval);
+        waited += interval;
+    }
+}
+
 // Yields one response, then stays idle for a bounded period instead of
 // immediately signaling stream exhaustion. A stream that naturally exhausts
 // right after its one response causes the client to conclude the response was
@@ -718,7 +737,12 @@ function testListenerUsesLocalTlsGrpcFixture() returns error? {
     };
     check endpoint.attach(handler, FIXTURE_TOPIC);
     check endpoint.'start();
-    runtime:sleep(0.2);
+    check waitUntil(function() returns boolean {
+        byte[]|error? loaded = replayStore.load({
+            tenantId: "00DFixture000001", topic: FIXTURE_TOPIC, subscriptionName: "default"
+        });
+        return loaded is byte[] && loaded == [7, 8, 9];
+    });
     // immediateStop() is used because this test only needs the already-saved
     // checkpoint, not a bounded graceful wait; see
     // testListenerGracefulStopBoundsWaitOnAnIdleStream (FIXTURE_STUCK_TOPIC)
@@ -764,7 +788,12 @@ function testListenerAttachesDeclarativeServiceThroughLocalTlsGrpcFixture() retu
     // service-statement syntax, which does not support an absolute path.
     check endpoint.attach(handler, ["event", "Fixture__e"]);
     check endpoint.'start();
-    runtime:sleep(0.2);
+    check waitUntil(function() returns boolean {
+        byte[]|error? loaded = replayStore.load({
+            tenantId: "00DFixture000001", topic: FIXTURE_TOPIC, subscriptionName: "default"
+        });
+        return loaded is byte[] && loaded == [7, 8, 9];
+    });
     check endpoint.immediateStop();
     byte[]? replayId = check replayStore.load({
         tenantId: "00DFixture000001",
@@ -802,7 +831,15 @@ function testListenerBindsTwoDeclarativeServicesToIndependentTopics() returns er
     check endpoint.attach(firstHandler, ["event", "Fixture__e"]);
     check endpoint.attach(secondHandler, ["event", "FixtureMultiEvent__e"]);
     check endpoint.'start();
-    runtime:sleep(0.3);
+    check waitUntil(function() returns boolean {
+        byte[]|error? first = replayStore.load({
+            tenantId: "00DFixture000001", topic: FIXTURE_TOPIC, subscriptionName: "default"
+        });
+        byte[]|error? second = replayStore.load({
+            tenantId: "00DFixture000001", topic: FIXTURE_MULTI_EVENT_TOPIC, subscriptionName: "default"
+        });
+        return first is byte[] && first == [7, 8, 9] && second is byte[];
+    });
     check endpoint.immediateStop();
 
     byte[]? firstReplay = check replayStore.load({
@@ -840,7 +877,16 @@ function testListenerGracefulStopBoundsWaitOnAnIdleStream() returns error? {
     };
     check endpoint.attach(handler, FIXTURE_STUCK_TOPIC);
     check endpoint.'start();
-    runtime:sleep(0.2);
+    // Waits for the fixture's one canned event to be checkpointed, which only
+    // happens after the worker has looped back for its *second* receive --
+    // the call that genuinely blocks for 60s (see FixtureStuckAfterOneResponseStream).
+    // That's the precise signal that the stream is now stuck, not just open.
+    check waitUntil(function() returns boolean {
+        byte[]|error? loaded = replayStore.load({
+            tenantId: "00DFixture000001", topic: FIXTURE_STUCK_TOPIC, subscriptionName: "default"
+        });
+        return loaded is byte[] && loaded == [1, 2, 3];
+    });
     time:Utc before = time:utcNow();
     check endpoint.gracefulStop();
     decimal elapsed = time:utcDiffSeconds(time:utcNow(), before);
@@ -869,7 +915,9 @@ function testListenerBoundsWireCreditAcrossMultipleReplenishmentRoundTrips() ret
     FixtureFailingAtService handler = new ("never-fails");
     check endpoint.attach(handler, FIXTURE_FLOW_CONTROL_TOPIC);
     check endpoint.'start();
-    runtime:sleep(0.5);
+    check waitUntil(function() returns boolean {
+        return handler.messages().length() >= 4;
+    });
     check endpoint.immediateStop();
 
     test:assertEquals(handler.messages(), ["flow-1", "flow-2", "flow-3", "flow-4"]);
@@ -903,7 +951,12 @@ function testListenerReconnectsAndResumesDeliveryAfterStreamClosure() returns er
     };
     check endpoint.attach(handler, FIXTURE_RECONNECT_TOPIC);
     check endpoint.'start();
-    runtime:sleep(0.5);
+    check waitUntil(function() returns boolean {
+        byte[]|error? loaded = replayStore.load({
+            tenantId: "00DFixture000001", topic: FIXTURE_RECONNECT_TOPIC, subscriptionName: "default"
+        });
+        return loaded is byte[] && loaded == [4, 5, 6];
+    }, 8);
     check endpoint.immediateStop();
     byte[]? replayId = check replayStore.load({
         tenantId: "00DFixture000001",
@@ -951,7 +1004,12 @@ function testListenerReusesValidRefreshTokenAcrossReconnect() returns error? {
     };
     check endpoint.attach(handler, FIXTURE_RECONNECT_TOKEN_TOPIC);
     check endpoint.'start();
-    runtime:sleep(0.5);
+    check waitUntil(function() returns boolean {
+        byte[]|error? loaded = replayStore.load({
+            tenantId: "00DFixture000001", topic: FIXTURE_RECONNECT_TOKEN_TOPIC, subscriptionName: "default"
+        });
+        return loaded is byte[] && loaded == [4, 5, 6];
+    });
     check endpoint.immediateStop();
 
     byte[]? replayId = check replayStore.load({
@@ -1134,7 +1192,13 @@ function testListenerNotifiesOnErrorAndRecordsTerminalFailureOnStreamError() ret
     FixtureErrorAwareService handler = new;
     check endpoint.attach(handler, FIXTURE_ERROR_TOPIC);
     check endpoint.'start();
-    runtime:sleep(0.3);
+    // Waits for both: terminalError and the onError notification are set
+    // sequentially on the worker's own strand with no yield point between
+    // them, but polling only the first would still race the second on a
+    // slow/loaded runner.
+    check waitUntil(function() returns boolean {
+        return endpoint.getLastError() is ListenerError && handler.wasNotified();
+    });
     ListenerError? lastError = endpoint.getLastError();
     test:assertTrue(lastError is ListenerError);
     if lastError is ListenerError {
@@ -1165,7 +1229,12 @@ function testListenerHandlerFailureMidBatchHoldsLaterEventsAndChecksAtLastGood()
     FixtureFailingAtService handler = new ("event-7");
     check endpoint.attach(handler, FIXTURE_MULTI_EVENT_TOPIC);
     check endpoint.'start();
-    runtime:sleep(0.3);
+    // Safe to poll getLastError() alone: the checkpoint and handler.messages()
+    // asserted below are both set earlier in the same worker strand's
+    // sequential execution, strictly before terminateAfterFailure runs.
+    check waitUntil(function() returns boolean {
+        return endpoint.getLastError() is ListenerError;
+    });
     test:assertTrue(endpoint.getLastError() is ListenerError);
     test:assertEquals(handler.messages(), ["event-1", "event-2", "event-3", "event-4", "event-5", "event-6", "event-7"]);
     byte[]? replayId = check replayStore.load({
@@ -1203,7 +1272,9 @@ function testListenerRedeliversEventAfterCheckpointSaveFailure() returns error? 
     FixtureCountingService firstHandler = new;
     check firstEndpoint.attach(firstHandler, FIXTURE_TOPIC);
     check firstEndpoint.'start();
-    runtime:sleep(0.3);
+    check waitUntil(function() returns boolean {
+        return firstEndpoint.getLastError() is ListenerError;
+    });
     test:assertTrue(firstEndpoint.getLastError() is ListenerError);
     test:assertEquals(firstHandler.deliveryCount(), 1);
     byte[]? checkpointAfterFailure = check replayStore.load(checkpointKey);
@@ -1221,7 +1292,9 @@ function testListenerRedeliversEventAfterCheckpointSaveFailure() returns error? 
     FixtureCountingService secondHandler = new;
     check secondEndpoint.attach(secondHandler, FIXTURE_TOPIC);
     check secondEndpoint.'start();
-    runtime:sleep(0.3);
+    check waitUntil(function() returns boolean {
+        return secondHandler.deliveryCount() >= 1;
+    });
     check secondEndpoint.immediateStop();
     test:assertEquals(secondHandler.deliveryCount(), 1);
     byte[]? checkpointAfterRestart = check replayStore.load(checkpointKey);
@@ -1254,7 +1327,9 @@ function testListenerTreatsPermissionDeniedAsTerminalWithoutRetry() returns erro
     };
     check endpoint.attach(handler, FIXTURE_PERMISSION_DENIED_TOPIC);
     check endpoint.'start();
-    runtime:sleep(0.3);
+    check waitUntil(function() returns boolean {
+        return endpoint.getLastError() is ListenerError;
+    });
     ListenerError? lastError = endpoint.getLastError();
     test:assertTrue(lastError is ListenerError);
     if lastError is ListenerError {
@@ -1286,7 +1361,9 @@ function testListenerStopsAfterMalformedCdcEventFailsNormalization() returns err
     FixtureCountingService handler = new;
     check endpoint.attach(handler, FIXTURE_MALFORMED_CDC_TOPIC);
     check endpoint.'start();
-    runtime:sleep(0.3);
+    check waitUntil(function() returns boolean {
+        return endpoint.getLastError() is ListenerError;
+    });
     test:assertTrue(endpoint.getLastError() is ListenerError);
     test:assertEquals(handler.deliveryCount(), 0);
     byte[]? replayId = check replayStore.load({
@@ -1324,7 +1401,9 @@ function testListenerStopsAllTopicsWhenCdcNormalizationFailsOnOneTopic() returns
     check endpoint.attach(healthyHandler, FIXTURE_TOPIC);
     check endpoint.attach(cdcHandler, FIXTURE_MALFORMED_CDC_TOPIC);
     check endpoint.'start();
-    runtime:sleep(0.3);
+    check waitUntil(function() returns boolean {
+        return endpoint.getLastError() is ListenerError;
+    });
     ListenerError? lastError = endpoint.getLastError();
     test:assertTrue(lastError is ListenerError);
     if lastError is ListenerError {
@@ -1354,7 +1433,9 @@ function testListenerTreatsMismatchedCdcWriterSchemaAsTerminal() returns error? 
     FixtureCountingService handler = new;
     check endpoint.attach(handler, FIXTURE_INVALID_CDC_SCHEMA_TOPIC);
     check endpoint.'start();
-    runtime:sleep(0.3);
+    check waitUntil(function() returns boolean {
+        return endpoint.getLastError() is ListenerError;
+    });
     test:assertTrue(endpoint.getLastError() is ListenerError);
     test:assertEquals(handler.deliveryCount(), 0);
     check endpoint.immediateStop();
@@ -1380,7 +1461,9 @@ function testListenerNormalizesCreateUpdateDeleteChangeEventsOverTheWire() retur
     FixtureCdcRecorderService handler = new;
     check endpoint.attach(handler, FIXTURE_CDC_EVENTS_TOPIC);
     check endpoint.'start();
-    runtime:sleep(0.3);
+    check waitUntil(function() returns boolean {
+        return handler.deliveries().length() >= 3;
+    });
     check endpoint.immediateStop();
 
     test:assertEquals(handler.deliveries(), ["CREATE:Acme Inc", "UPDATE:Acme International", "DELETE:<absent>"]);
@@ -1407,7 +1490,9 @@ function testListenerDecodesEachEventWithItsOwnRecordedSchema() returns error? {
     FixtureSchemaEvolutionRecorderService handler = new;
     check endpoint.attach(handler, FIXTURE_SCHEMA_EVOLUTION_TOPIC);
     check endpoint.'start();
-    runtime:sleep(0.3);
+    check waitUntil(function() returns boolean {
+        return handler.deliveries().length() >= 2;
+    });
     check endpoint.immediateStop();
 
     test:assertEquals(handler.deliveries(), ["old-shape:<absent>", "new-shape:added-field"]);
@@ -1450,7 +1535,10 @@ function testListenerRecoversFromRejectedReplayUsingConfiguredPolicy() returns e
     };
     check endpoint.attach(handler, FIXTURE_REPLAY_RECOVERY_TOPIC);
     check endpoint.'start();
-    runtime:sleep(0.3);
+    check waitUntil(function() returns boolean {
+        byte[]|error? loaded = replayStore.load(checkpointKey);
+        return loaded is byte[] && loaded == [11, 12, 13];
+    });
     check endpoint.immediateStop();
     byte[]? replayId = check replayStore.load(checkpointKey);
     test:assertEquals(replayId, [11, 12, 13]);
@@ -1490,7 +1578,9 @@ function testListenerStopsAllTopicsWhenOneFailsTerminally() returns error? {
     check endpoint.attach(healthyHandler, FIXTURE_TOPIC);
     check endpoint.attach(failingHandler, FIXTURE_ERROR_TOPIC);
     check endpoint.'start();
-    runtime:sleep(0.3);
+    check waitUntil(function() returns boolean {
+        return endpoint.getLastError() is ListenerError;
+    });
     ListenerError? lastError = endpoint.getLastError();
     test:assertTrue(lastError is ListenerError);
     if lastError is ListenerError {
@@ -1532,7 +1622,15 @@ function testListenerMakesIndependentProgressAcrossTwoTopics() returns error? {
     check endpoint.attach(slowHandler, FIXTURE_TOPIC);
     check endpoint.attach(fastHandler, FIXTURE_MULTI_EVENT_TOPIC);
     check endpoint.'start();
-    runtime:sleep(0.6);
+    check waitUntil(function() returns boolean {
+        if fastHandler.deliveryCount() < 10 {
+            return false;
+        }
+        byte[]|error? slowLoaded = replayStore.load({
+            tenantId: "00DFixture000001", topic: FIXTURE_TOPIC, subscriptionName: "default"
+        });
+        return slowLoaded is byte[] && slowLoaded == [7, 8, 9];
+    }, 8);
     check endpoint.immediateStop();
 
     test:assertEquals(fastHandler.deliveryCount(), 10);
@@ -1603,7 +1701,12 @@ function testListenerRepeatedStopIsIdempotent() returns error? {
     };
     check endpoint.attach(handler, FIXTURE_TOPIC);
     check endpoint.'start();
-    runtime:sleep(0.2);
+    check waitUntil(function() returns boolean {
+        byte[]|error? loaded = replayStore.load({
+            tenantId: "00DFixture000001", topic: FIXTURE_TOPIC, subscriptionName: "default"
+        });
+        return loaded is byte[] && loaded == [7, 8, 9];
+    });
     check endpoint.immediateStop();
     check endpoint.immediateStop();
     check endpoint.gracefulStop();

@@ -102,6 +102,23 @@ isolated function validateConnectionConfig(ConnectionConfig config) returns erro
     if auth is http:OAuth2RefreshTokenGrantConfig && !isAllowedRefreshUrl(auth.refreshUrl) {
         return error("auth.refreshUrl must use https (plain http is only allowed against localhost/127.0.0.1, for local testing)");
     }
+    grpc:ClientSecureSocket? secureSocket = config.grpcConfig.secureSocket;
+    if secureSocket is grpc:ClientSecureSocket && !secureSocket.enable && !isLoopbackEndpoint(config.endpoint) {
+        return error("grpcConfig.secureSocket.enable=false is only allowed against a loopback endpoint " +
+            "(localhost/127.0.0.1); TLS certificate validation must stay enabled otherwise");
+    }
+}
+
+// A loopback endpoint is the only place TLS certificate validation may be
+// turned off: real Salesforce endpoints must always validate, and a local
+// test fixture that needs an untrusted-cert exception should instead supply
+// a trust root via secureSocket.cert (see tests/resources/local-grpc.crt),
+// not disable validation outright.
+isolated function isLoopbackEndpoint(string endpoint) returns boolean {
+    return endpoint.startsWith("https://localhost:") || endpoint == "https://localhost" ||
+        endpoint.startsWith("https://localhost/") ||
+        endpoint.startsWith("https://127.0.0.1:") || endpoint == "https://127.0.0.1" ||
+        endpoint.startsWith("https://127.0.0.1/");
 }
 
 // A refresh URL is either https, or plain http against a loopback address --

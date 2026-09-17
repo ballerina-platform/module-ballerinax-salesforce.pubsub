@@ -35,8 +35,15 @@ public configurable string sandboxRefreshUrl = os:getEnv("REFRESH_URL");
 public configurable string sandboxUsername = os:getEnv("SF_USERNAME");
 public configurable string sandboxPassword = os:getEnv("SF_PASSWORD");
 public configurable string sandboxTenantId = tenantIdFromSessionToken(sandboxAccessToken);
-public configurable boolean pubsubSandboxTests = sandboxEndpoint != "" && sandboxAccessToken != "" &&
-        sandboxClientId != "" && sandboxClientSecret != "" && sandboxRefreshUrl != "";
+// Deliberately excluded from the automated build: the shared reusable
+// workflows forward every repo/org secret into the job environment (see the
+// comment above), so the sandbox credentials above would otherwise be
+// present and these tests would run against a real Salesforce sandbox on
+// every CI build. GitHub Actions sets CI=true for every job by default; a
+// developer's local shell does not, so `bal test --groups sandbox,sandbox-cdc`
+// still runs them intentionally outside CI.
+public configurable boolean pubsubSandboxTests = os:getEnv("CI") == "" && sandboxEndpoint != "" &&
+        sandboxAccessToken != "" && sandboxClientId != "" && sandboxClientSecret != "" && sandboxRefreshUrl != "";
 
 function tenantIdFromSessionToken(string sessionToken) returns string {
     int? separator = sessionToken.indexOf("!");
