@@ -1,0 +1,27 @@
+{
+  "version": "v1.0",
+
+  "listeners": [
+    {
+      "id": "$listener",
+      "doc": "Opens authenticated Subscribe gRPC streams to the Salesforce Pub/Sub API for every attached topic and dispatches each decoded event, in topic order, to the service registered for that topic.",
+      "type": { "name": "Listener" },
+      "services": ["$service"],
+      "multipleServicesAllowed": true,
+      "multipleServicesOfSameTypeAllowed": true
+    }
+  ],
+
+  "serviceTypes": [
+    {
+      "id": "$service",
+      "doc": "Receives decoded events published to the subscribed Salesforce Pub/Sub topic, delivered in topic order. Declare with the canonical topic path as the service's attach point, e.g. `service /event/MyEvent__e on listener { ... }` or `service \"/event/MyEvent__e\" on listener { ... }`. A service may also implement an optional `remote function onError(pubsub:ListenerError err) returns error?;` callback, invoked once with the terminal failure context when an unrecoverable subscription error stops the Listener; this is not part of the `Service` type itself, so add it by hand when you need it.",
+      "type": { "name": "Service" },
+      "concrete": true,
+      "multipleListenersAllowed": true,
+      "handlers": {
+        "backedByConcreteType": true
+      }
+    }
+  ]
+}

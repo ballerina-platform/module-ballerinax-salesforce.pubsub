@@ -47,9 +47,10 @@ def stripBallerinaExtensionVersion(String extVersion) {
 ballerina {
     packageOrganization = packageOrg
     module = packageName
-    testCoverageParam = "--code-coverage --coverage-format=xml"
-    isConnector = true
-    platform = "any"
+    langVersion = ballerinaLangVersion
+    testCoverageParam = ""
+    isConnector = false
+    platform = "java21"
 }
 
 task updateTomlFiles {
@@ -58,6 +59,20 @@ task updateTomlFiles {
         newBallerinaToml = newBallerinaToml.replace("@toml.version@", tomlVersion)
         ballerinaTomlFile.text = newBallerinaToml
     }
+}
+
+// Runs `bal build` with the same pinned U12+ toolchain Gradle uses for tests,
+// so the committed Dependencies.toml is resolved against a consistent
+// distribution rather than whatever `bal` a developer has on PATH. It
+// deliberately does NOT delete Dependencies.toml first: the committed lock is
+// the reviewed, tested dependency graph, and `bal build` only extends it when
+// something is genuinely missing.
+task resolveBallerinaDependencies(type: Exec) {
+    dependsOn unpackJballerinaTools
+    dependsOn copyStdlibs
+    dependsOn copyToLib
+    workingDir project.projectDir
+    commandLine 'sh', '-c', "$buildDir/jballerina-tools-${ballerinaLangVersion}/bin/bal build"
 }
 
 task commitTomlFiles {
@@ -96,5 +111,11 @@ clean {
 }
 
 build.dependsOn "generatePomFileForMavenPublication"
+build.dependsOn unpackJballerinaTools
+build.dependsOn copyToLib
+test.dependsOn unpackJballerinaTools
+test.dependsOn copyToLib
+test.dependsOn resolveBallerinaDependencies
+updateTomlFiles.dependsOn copyStdlibs
 publishToMavenLocal.dependsOn build
 publish.dependsOn build
