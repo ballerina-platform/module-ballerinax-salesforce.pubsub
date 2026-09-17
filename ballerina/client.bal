@@ -367,12 +367,15 @@ public class Listener {
                 return ();
             }
             error failure = streamError is error ? streamError : error("Subscribe stream closed");
-            // A failure to set up the replacement (new channel, or the new
-            // stream itself) is folded back into `failure` and re-classified
-            // on the next spin of this inner loop, so it consumes the same
-            // reconnect budget as a stream-read failure instead of aborting
-            // the topic on the first attempt made during a still-ongoing
-            // outage.
+            // Fixed for the whole cycle: a later setup failure isn't itself
+            // an invalid-replay error, so recomputing this per attempt would
+            // drop back to the stale, already-rejected cursor.
+            ActiveSubscription? triggeringSubscription = self.subscriptions[topic];
+            ReplayPosition? recoveryPosition = isInvalidReplayError(failure) && triggeringSubscription is ActiveSubscription ?
+                triggeringSubscription.config.expiredReplayRecovery : ();
+            // A setup failure is folded back into `failure` and re-classified
+            // on the next spin, so it consumes the same reconnect budget as
+            // a stream-read failure.
             while true {
                 ActiveSubscription? previous = self.subscriptions[topic];
                 boolean invalidReplay = isInvalidReplayError(failure);
@@ -393,12 +396,13 @@ public class Listener {
                 if attachedService !is Service {
                     return error("listener subscription state is unavailable");
                 }
-                ReplayPosition? recoveryPosition = invalidReplay ? previous.config.expiredReplayRecovery : ();
                 error? setupError = self.reopenTopicSubscription(topic, attachedService, failure, recoveryPosition);
                 if setupError is error {
                     failure = setupError;
                     continue;
                 }
+                // Budget is per outage, not per topic lifetime.
+                retryNumber = 0;
                 break;
             }
         }
