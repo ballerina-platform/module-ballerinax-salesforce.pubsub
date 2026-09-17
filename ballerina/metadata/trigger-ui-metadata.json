@@ -1,0 +1,283 @@
+{
+  "version": "v1.0",
+  "metadata": {
+    "kind": "event"
+  },
+  "trigger": {
+    "displayName": "Salesforce Pub/Sub",
+    "description": "Subscribe to Salesforce Change Data Capture and Platform Event channels over the gRPC Pub/Sub API, with ordered per-topic delivery, durable replay checkpoints, and automatic reconnect.",
+    "type": "salesforce.pubsub"
+  },
+  "readOnlyMetadata": [
+    {
+      "key": "serviceType",
+      "displayName": "Event Type",
+      "extractor": "SERVICE_DESCRIPTION"
+    },
+    {
+      "key": "basePath",
+      "displayName": "Topic",
+      "extractor": "SERVICE_BASE_PATH"
+    }
+  ],
+  "listeners": [
+    {
+      "target": "$listener",
+      "form": {
+        "section": {
+          "label": "Listener",
+          "description": "Attach the service to a new or existing Salesforce Pub/Sub listener."
+        },
+        "createNew": {
+          "label": "Create New Listener",
+          "description": "Define a new Salesforce Pub/Sub listener in the project."
+        },
+        "listenerConfig": {
+          "label": "Listener Configurations",
+          "description": "Configure the Salesforce Pub/Sub API (gRPC) listener."
+        },
+        "useExisting": {
+          "label": "Use Existing Listener",
+          "description": "Attach to one or more Salesforce Pub/Sub listeners already declared in the project."
+        },
+        "existingListener": {
+          "label": "Listener(s)",
+          "description": "Select one or more existing listeners to attach the service to (no new(...) is generated)."
+        },
+        "existingListenerWidget": "MULTI_SELECT_LISTENER",
+        "existingListenerItems": [
+          "salesforcePubSubListener"
+        ],
+        "existingListenerValue": [
+          "salesforcePubSubListener"
+        ]
+      },
+      "formFields": {
+        "listenerVarName": {
+          "key": "listenerVarName",
+          "default": "salesforcePubSubListener",
+          "metadata": {
+            "label": "Listener Name",
+            "description": "Provide a name for the listener being created."
+          },
+          "source": {
+            "construct": {
+              "kind": "LISTENER_VAR_NAME"
+            }
+          },
+          "state": {
+            "enabled": true,
+            "editable": true,
+            "optional": false,
+            "advanced": false
+          }
+        },
+        "instanceUrl": {
+          "key": "instanceUrl",
+          "placeholder": "https://mydomain.my.salesforce.com",
+          "default": "",
+          "metadata": {
+            "label": "Instance URL",
+            "description": "The Salesforce instance URL included in Pub/Sub RPC metadata."
+          },
+          "source": {
+            "argument": {
+              "kind": "LISTENER_PARAM_CONFIG_FIELD",
+              "position": 1
+            },
+            "path": "connection.instanceUrl"
+          },
+          "state": {
+            "enabled": true,
+            "editable": true,
+            "optional": false,
+            "advanced": false
+          }
+        },
+        "tenantId": {
+          "key": "tenantId",
+          "placeholder": "00Dxx0000000000EAA",
+          "default": "",
+          "metadata": {
+            "label": "Tenant (Org) ID",
+            "description": "The Salesforce tenant/org identifier included in Pub/Sub RPC metadata."
+          },
+          "source": {
+            "argument": {
+              "kind": "LISTENER_PARAM_CONFIG_FIELD",
+              "position": 1
+            },
+            "path": "connection.tenantId"
+          },
+          "state": {
+            "enabled": true,
+            "editable": true,
+            "optional": false,
+            "advanced": false
+          }
+        },
+        "auth": {
+          "key": "auth",
+          "default": "",
+          "metadata": {
+            "label": "OAuth2 Configuration",
+            "description": "OAuth2 credentials used to authenticate with the Salesforce Pub/Sub API (bearer token, password grant, refresh-token grant, or client-credentials grant)."
+          },
+          "source": {
+            "argument": {
+              "kind": "LISTENER_PARAM_CONFIG_FIELD",
+              "position": 1
+            },
+            "path": "connection.auth"
+          },
+          "widget": {
+            "widgetKind": "RECORD_MAP_EXPRESSION",
+            "selected": true,
+            "ballerinaType": "http:BearerTokenConfig|oauth2:PasswordGrantConfig|oauth2:RefreshTokenGrantConfig|oauth2:ClientCredentialsGrantConfig",
+            "typeMembers": [
+              {
+                "type": "BearerTokenConfig",
+                "packageInfo": "ballerina:http:2.14.11",
+                "packageName": "http",
+                "kind": "RECORD_TYPE",
+                "selected": false
+              },
+              {
+                "type": "PasswordGrantConfig",
+                "packageInfo": "ballerina:oauth2:2.14.1",
+                "packageName": "oauth2",
+                "kind": "RECORD_TYPE",
+                "selected": false
+              },
+              {
+                "type": "RefreshTokenGrantConfig",
+                "packageInfo": "ballerina:oauth2:2.14.1",
+                "packageName": "oauth2",
+                "kind": "RECORD_TYPE",
+                "selected": true
+              },
+              {
+                "type": "ClientCredentialsGrantConfig",
+                "packageInfo": "ballerina:oauth2:2.14.1",
+                "packageName": "oauth2",
+                "kind": "RECORD_TYPE",
+                "selected": false
+              }
+            ]
+          },
+          "state": {
+            "enabled": true,
+            "editable": true,
+            "optional": false,
+            "advanced": false
+          }
+        },
+        "subscriptionConfig": {
+          "key": "subscriptionConfig",
+          "default": "{}",
+          "metadata": {
+            "label": "Subscription Configuration",
+            "description": "Default per-topic replay position, buffer size, and retry policy."
+          },
+          "source": {
+            "argument": {
+              "kind": "LISTENER_PARAM_CONFIG_FIELD",
+              "position": 1
+            },
+            "path": "subscriptionConfig"
+          },
+          "widget": {
+            "widgetKind": "RECORD_MAP_EXPRESSION",
+            "selected": true,
+            "ballerinaType": "SubscriptionConfig",
+            "typeMembers": [
+              {
+                "type": "SubscriptionConfig",
+                "packageInfo": "ballerinax:salesforce.pubsub:0.1.0",
+                "packageName": "salesforce.pubsub",
+                "kind": "RECORD_TYPE",
+                "selected": true
+              }
+            ]
+          },
+          "state": {
+            "enabled": true,
+            "editable": true,
+            "optional": true,
+            "advanced": true
+          }
+        }
+      },
+      "serviceProperties": {
+        "basePath": {
+          "key": "basePath",
+          "placeholder": "/event/MyEvent__e",
+          "default": "",
+          "validations": [
+            {
+              "rule": "common.validate.required"
+            }
+          ],
+          "metadata": {
+            "label": "Topic",
+            "description": "The canonical Salesforce Pub/Sub topic path to subscribe to. Use a Platform Event channel (e.g. /event/MyEvent__e) or a Change Data Capture channel (e.g. /data/ChangeEvents)."
+          },
+          "widget": {
+            "widgetKind": "SERVICE_PATH",
+            "selected": true,
+            "ballerinaType": "string"
+          },
+          "source": {
+            "construct": {
+              "kind": "SERVICE_BASE_PATH"
+            }
+          },
+          "state": {
+            "enabled": true,
+            "editable": true,
+            "optional": false,
+            "advanced": false
+          }
+        }
+      }
+    }
+  ],
+  "serviceTypes": [
+    {
+      "target": "$service",
+      "metadata": {
+        "label": "Pub/Sub Event",
+        "description": "Triggers when a new event is received on the subscribed Salesforce Pub/Sub topic. Available action: onEvent, with an optional onError failure callback."
+      },
+      "source": {
+        "construct": {
+          "kind": "SERVICE_TYPE_DESCRIPTOR"
+        },
+        "argument": {
+          "originalName": "Service"
+        },
+        "module": {
+          "name": "salesforce.pubsub"
+        }
+      },
+      "state": {
+        "enabled": true,
+        "editable": true
+      }
+    }
+  ],
+  "artifactInfo": {
+    "displayLabel": "Salesforce Pub/Sub Event Integration",
+    "identifier": {
+      "separator": " - ",
+      "resolvers": [
+        { "via": "servicePath" }
+      ]
+    },
+    "icon": {
+      "lightPath": "icons/light.svg",
+      "darkPath": "icons/dark.svg",
+      "color": "#00A1E0"
+    }
+  }
+}
