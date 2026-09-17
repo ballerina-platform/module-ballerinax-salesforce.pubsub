@@ -101,6 +101,11 @@ public class Listener {
     private map<Service> services = {};
     private map<ActiveSubscription> subscriptions = {};
     private map<future<error?>> workers = {};
+    // Workers whose shutdown wait timed out: Ballerina's alternate `wait`
+    // never cancelled them for us, so they may still be running. Tracked here
+    // so 'start() can confirm they have actually exited before reusing the
+    // topic, instead of racing a fresh worker against a leaked one.
+    private map<future<error?>> drainingWorkers = {};
     private wire:PubSubClient? pubsubClient = ();
     private boolean started = false;
     private ListenerError? terminalError = ();
@@ -169,6 +174,7 @@ public class Listener {
         if self.started {
             return ();
         }
+        check self.fenceDrainingWorkers();
         wire:PubSubClient grpcClient = check new (self.config.connection.endpoint, grpcConfigFor(self.config.connection));
         self.pubsubClient = grpcClient;
         foreach var [topic, attachedService] in self.services.entries() {
@@ -227,9 +233,15 @@ public class Listener {
         foreach var [topic, workerFuture] in self.workers.entries() {
             waiters[topic] = start waitForWorker(workerFuture, workerWaitTimeoutSeconds);
         }
-        foreach var [_, waiterFuture] in waiters.entries() {
+        foreach var [topic, waiterFuture] in waiters.entries() {
             error?|ShutdownTimedOut outcome = wait waiterFuture;
-            if outcome is error && firstError is () {
+            if outcome is ShutdownTimedOut {
+                future<error?>? staleWorker = self.workers[topic];
+                if staleWorker is future<error?> {
+                    staleWorker.cancel();
+                    self.drainingWorkers[topic] = staleWorker;
+                }
+            } else if outcome is error && firstError is () {
                 firstError = outcome;
             }
         }
@@ -238,6 +250,34 @@ public class Listener {
         self.pubsubClient = ();
         if firstError is error {
             return firstError;
+        }
+    }
+
+    // Confirms every topic left "draining" by a previous shutdown timeout has
+    // actually exited before 'start() reuses it. Cancellation only sets a
+    // cooperative flag the worker's strand checks the next time it yields, so
+    // this waits again -- bounded by the same shutdown timeout -- rather than
+    // assuming cancel() already stopped it.
+    private function fenceDrainingWorkers() returns error? {
+        if self.drainingWorkers.length() == 0 {
+            return;
+        }
+        string[] exited = [];
+        string leaked = "";
+        foreach var [topic, staleWorker] in self.drainingWorkers.entries() {
+            error?|ShutdownTimedOut outcome = waitForWorker(staleWorker, GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS);
+            if outcome is ShutdownTimedOut {
+                leaked = leaked.length() == 0 ? topic : leaked + ", " + topic;
+            } else {
+                exited.push(topic);
+            }
+        }
+        foreach string topic in exited {
+            _ = self.drainingWorkers.remove(topic);
+        }
+        if leaked.length() > 0 {
+            return error("cannot start: a worker for topic(s) " + leaked +
+                " has not exited since a previous shutdown timed out; it may be leaked");
         }
     }
 
@@ -327,39 +367,66 @@ public class Listener {
                 return ();
             }
             error failure = streamError is error ? streamError : error("Subscribe stream closed");
-            ActiveSubscription? previous = self.subscriptions[topic];
-            boolean invalidReplay = isInvalidReplayError(failure);
-            if previous !is ActiveSubscription || (!invalidReplay && !isReconnectableStreamError(failure)) {
-                return failure;
-            }
-            retryNumber += 1;
-            if !canRetry(previous.config.reconnectRetry, retryNumber) {
-                return failure;
-            }
-            runtime:sleep(check retryDelay(previous.config.reconnectRetry, retryNumber));
-            wire:SubscribeStreamingClient oldStream = previous.streamClient;
-            error? closeError = oldStream->complete();
-            if closeError is error {
-                // The stream is already unusable; opening its replacement is safe.
-            }
-            Service? attachedService = self.services[topic];
-            if attachedService !is Service {
-                return error("listener subscription state is unavailable");
-            }
-            wire:PubSubClient currentClient;
-            if isChannelLevelFailure(failure) {
-                currentClient = check new (self.config.connection.endpoint, grpcConfigFor(self.config.connection));
-                self.pubsubClient = currentClient;
-            } else {
-                wire:PubSubClient? existingClient = self.pubsubClient;
-                if existingClient !is wire:PubSubClient {
+            // A failure to set up the replacement (new channel, or the new
+            // stream itself) is folded back into `failure` and re-classified
+            // on the next spin of this inner loop, so it consumes the same
+            // reconnect budget as a stream-read failure instead of aborting
+            // the topic on the first attempt made during a still-ongoing
+            // outage.
+            while true {
+                ActiveSubscription? previous = self.subscriptions[topic];
+                boolean invalidReplay = isInvalidReplayError(failure);
+                if previous !is ActiveSubscription || (!invalidReplay && !isReconnectableStreamError(failure)) {
+                    return failure;
+                }
+                retryNumber += 1;
+                if !canRetry(previous.config.reconnectRetry, retryNumber) {
+                    return failure;
+                }
+                runtime:sleep(check retryDelay(previous.config.reconnectRetry, retryNumber));
+                wire:SubscribeStreamingClient oldStream = previous.streamClient;
+                error? closeError = oldStream->complete();
+                if closeError is error {
+                    // The stream is already unusable; opening its replacement is safe.
+                }
+                Service? attachedService = self.services[topic];
+                if attachedService !is Service {
                     return error("listener subscription state is unavailable");
                 }
-                currentClient = existingClient;
+                ReplayPosition? recoveryPosition = invalidReplay ? previous.config.expiredReplayRecovery : ();
+                error? setupError = self.reopenTopicSubscription(topic, attachedService, failure, recoveryPosition);
+                if setupError is error {
+                    failure = setupError;
+                    continue;
+                }
+                break;
             }
-            ReplayPosition? recoveryPosition = invalidReplay ? previous.config.expiredReplayRecovery : ();
-            check self.openTopicSubscription(currentClient, topic, attachedService, recoveryPosition);
         }
+    }
+
+    // Rebuilds the channel (only when `causeOfReconnect` was channel-level)
+    // and reopens the topic's stream. Returns any failure from either step
+    // instead of `check`-ing it, so the caller can run it back through the
+    // reconnect budget rather than treat the first setup failure as terminal.
+    private function reopenTopicSubscription(string topic, Service attachedService, error causeOfReconnect,
+            ReplayPosition? recoveryPosition) returns error? {
+        wire:PubSubClient currentClient;
+        if isChannelLevelFailure(causeOfReconnect) {
+            wire:PubSubClient|error newClient = new (self.config.connection.endpoint,
+                grpcConfigFor(self.config.connection));
+            if newClient is error {
+                return newClient;
+            }
+            currentClient = newClient;
+            self.pubsubClient = currentClient;
+        } else {
+            wire:PubSubClient? existingClient = self.pubsubClient;
+            if existingClient !is wire:PubSubClient {
+                return error("listener subscription state is unavailable");
+            }
+            currentClient = existingClient;
+        }
+        return self.openTopicSubscription(currentClient, topic, attachedService, recoveryPosition);
     }
 
     // Stops every stream after a fatal subscription error. The error is

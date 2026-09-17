@@ -95,6 +95,17 @@ public isolated client class Publisher {
             pubsubApi:PublishResponse|error outcome = self.pubsubClient->Publish({
                 content: {topic_name: self.topic, events: chunk}, headers
             });
+            if outcome is error && grpcStatusNameOf(outcome) == "UNAUTHENTICATED" {
+                // The token that was current when this chunk started can expire
+                // partway through a large batch; retrying with a fresh token
+                // once here keeps that from failing every remaining chunk.
+                check self.tokenManager.invalidateAccessToken();
+                string refreshedToken = check self.tokenManager.getAccessToken();
+                map<string|string[]> refreshedHeaders = check metadataForIdentity(self.connection, refreshedToken);
+                outcome = self.pubsubClient->Publish({
+                    content: {topic_name: self.topic, events: chunk}, headers: refreshedHeaders
+                });
+            }
             if outcome is error {
                 string? status = grpcStatusNameOf(outcome);
                 log:printWarn("Salesforce Pub/Sub Publish RPC failed (" + (status ?: "UNKNOWN") + "): " +

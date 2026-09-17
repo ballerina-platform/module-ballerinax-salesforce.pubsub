@@ -61,13 +61,17 @@ task updateTomlFiles {
     }
 }
 
+// Runs `bal build` with the same pinned U12+ toolchain Gradle uses for tests,
+// so the committed Dependencies.toml is resolved against a consistent
+// distribution rather than whatever `bal` a developer has on PATH. It
+// deliberately does NOT delete Dependencies.toml first: the committed lock is
+// the reviewed, tested dependency graph, and `bal build` only extends it when
+// something is genuinely missing.
 task resolveBallerinaDependencies(type: Exec) {
     dependsOn unpackJballerinaTools
     dependsOn copyStdlibs
+    dependsOn copyToLib
     workingDir project.projectDir
-    doFirst {
-        delete file("$project.projectDir/Dependencies.toml")
-    }
     commandLine 'sh', '-c', "$buildDir/jballerina-tools-${ballerinaLangVersion}/bin/bal build"
 }
 

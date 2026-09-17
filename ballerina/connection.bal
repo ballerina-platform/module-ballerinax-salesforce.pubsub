@@ -16,6 +16,7 @@
 
 import ballerinax/salesforce;
 import ballerina/grpc;
+import ballerina/http;
 
 final string DEFAULT_PUBSUB_ENDPOINT = "https://api.pubsub.salesforce.com:7443";
 
@@ -97,6 +98,24 @@ isolated function validateConnectionConfig(ConnectionConfig config) returns erro
     if config.sessionTimeout <= 60 {
         return error("sessionTimeout must be greater than 60 seconds");
     }
+    salesforce:OAuth2Config auth = config.auth;
+    if auth is http:OAuth2RefreshTokenGrantConfig && !isAllowedRefreshUrl(auth.refreshUrl) {
+        return error("auth.refreshUrl must use https (plain http is only allowed against localhost/127.0.0.1, for local testing)");
+    }
+}
+
+// A refresh URL is either https, or plain http against a loopback address --
+// the latter exists only so local test fixtures (an in-process OAuth server)
+// don't need a self-signed cert of their own. Any other plain-http host would
+// send the refresh token and client secret over the network in cleartext.
+isolated function isAllowedRefreshUrl(string refreshUrl) returns boolean {
+    if refreshUrl.startsWith("https://") {
+        return true;
+    }
+    return refreshUrl.startsWith("http://localhost:") || refreshUrl == "http://localhost" ||
+        refreshUrl.startsWith("http://localhost/") ||
+        refreshUrl.startsWith("http://127.0.0.1:") || refreshUrl == "http://127.0.0.1" ||
+        refreshUrl.startsWith("http://127.0.0.1/");
 }
 
 // Produces the transport configuration used for one-shot RPCs (Publish,

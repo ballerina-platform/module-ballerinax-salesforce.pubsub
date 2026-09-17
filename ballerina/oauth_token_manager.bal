@@ -187,10 +187,14 @@ isolated function refreshWhileLocked(salesforce:TokenStore tokenStore, readonly 
     [int, decimal] now = time:utcNow();
     int lifetime = sessionTimeout;
     json|error expiresIn = responseBody.expires_in;
-    if expiresIn is int && expiresIn > TOKEN_REFRESH_BUFFER_SECONDS {
+    if expiresIn is int && expiresIn > 0 {
         lifetime = expiresIn;
     }
-    int expiresAt = now[0] + lifetime - TOKEN_REFRESH_BUFFER_SECONDS;
+    // A server-issued lifetime shorter than the buffer is treated as
+    // effectively already due for refresh, rather than silently falling back
+    // to the connector's own configured `sessionTimeout` -- that fallback is
+    // only for when the server omits `expires_in` altogether.
+    int expiresAt = now[0] + (lifetime > TOKEN_REFRESH_BUFFER_SECONDS ? lifetime - TOKEN_REFRESH_BUFFER_SECONDS : 0);
     check tokenStore.setTokenData(storeKey, {
         accessToken,
         refreshToken: rotatedRefreshToken,

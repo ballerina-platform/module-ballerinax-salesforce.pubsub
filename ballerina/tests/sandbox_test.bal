@@ -433,20 +433,28 @@ function testSandboxAccountCdcLifecycle() returns error? {
     check cdcListener.attach(handler, SANDBOX_CDC_TOPIC);
     check cdcListener.'start();
     runtime:registerListener(cdcListener);
-    salesforce:CreationResponse created = check rest->create("Account", {"Name": runId});
+    // Not `check`ed: a failed create must not skip the Listener stop below and
+    // leave a live gRPC stream running past this test.
+    salesforce:CreationResponse|error created = rest->create("Account", {"Name": runId});
     int elapsed = 0;
     boolean received = false;
-    while elapsed < SANDBOX_CDC_WAIT_SECONDS {
-        received = didReceiveSandboxCdc();
-        if received {
-            break;
+    if created is salesforce:CreationResponse {
+        while elapsed < SANDBOX_CDC_WAIT_SECONDS {
+            received = didReceiveSandboxCdc();
+            if received {
+                break;
+            }
+            runtime:sleep(1);
+            elapsed += 1;
         }
-        runtime:sleep(1);
-        elapsed += 1;
     }
     ListenerError? lastError = cdcListener.getLastError();
-    // Stop before deleting: the cleanup delete must never satisfy this test.
+    // Stop before deleting, and regardless of whether the create above
+    // succeeded: the cleanup delete must never satisfy this test.
     error? stopError = cdcListener.immediateStop();
+    if created is error {
+        return error("failed to create sandbox Account: " + created.message());
+    }
     error? cleanup = rest->delete("Account", created.id);
     if stopError is error {
         return error("failed to stop sandbox CDC listener");

@@ -19,14 +19,16 @@ Supply the Salesforce instance URL, the Salesforce **org** ID (normally starts w
 import ballerina/http;
 import ballerinax/salesforce.pubsub;
 
+configurable string accessToken = ?;
+
 pubsub:ConnectionConfig connection = {
-    auth: <http:BearerTokenConfig>{token: "${ACCESS_TOKEN}"},
+    auth: <http:BearerTokenConfig>{token: accessToken},
     instanceUrl: "https://your-org.my.salesforce.com",
     tenantId: "00D..."
 };
 ```
 
-Do not commit access tokens, refresh tokens, or event payloads to source control. Use configurable values or deployment secret management instead.
+Do not commit access tokens, refresh tokens, or event payloads to source control. Use configurable values (as above) or deployment secret management instead.
 
 For a refresh-token grant, the connector retains the current access token and
 any Salesforce-rotated refresh token in `tokenStore`. The default is
