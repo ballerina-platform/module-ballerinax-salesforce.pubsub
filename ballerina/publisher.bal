@@ -15,6 +15,7 @@
 // under the License.
 
 import ballerinax/salesforce.pubsub.internal as pubsubApi;
+import ballerina/log;
 import ballerina/uuid;
 
 # Publishes a batch of events to one configured Salesforce topic. Transport
@@ -95,6 +96,9 @@ public isolated client class Publisher {
                 content: {topic_name: self.topic, events: chunk}, headers
             });
             if outcome is error {
+                string? status = grpcStatusNameOf(outcome);
+                log:printWarn("Salesforce Pub/Sub Publish RPC failed (" + (status ?: "UNKNOWN") + "): " +
+                    outcome.message());
                 if isAmbiguousPublishFailure(outcome) {
                     foreach pubsubApi:ProducerEvent event in chunk {
                         ambiguousEventIds.push(event.id);
@@ -115,8 +119,7 @@ public isolated client class Publisher {
         if ambiguousEventIds.length() > 0 {
             PublishResult[] definitiveResults = check definitiveResultsExcluding(identifiedEvents,
                 localFailures, definitiveWireResults, ambiguousEventIds);
-            return ambiguousPublishError(self.topic, ambiguousEventIds, definitiveResults,
-                error("one or more Publish RPCs ended without a definitive response"));
+            return ambiguousPublishError(self.topic, ambiguousEventIds, definitiveResults);
         }
         return mergePublisherResults(identifiedEvents, localFailures, definitiveWireResults);
     }
@@ -179,10 +182,15 @@ public isolated function ensurePublishEventIds(PublishEvent[] events) returns Pu
 // Rejects duplicate correlation IDs before Publish because a Salesforce result
 // identifies the input event by this ID. Generated IDs are UUIDs and callers
 // retain responsibility for making supplied IDs unique within a batch.
+final int MAX_PUBLISH_EVENT_ID_LENGTH = 36;
+
 isolated function validateUniquePublishEventIds(PublishEvent[] events) returns error? {
     map<boolean> seen = {};
     foreach PublishEvent event in events {
         string id = event.id ?: "";
+        if id.toBytes().length() > MAX_PUBLISH_EVENT_ID_LENGTH {
+            return error("publish event ID must not exceed " + MAX_PUBLISH_EVENT_ID_LENGTH.toString() + " UTF-8 bytes");
+        }
         if seen.hasKey(id) {
             return error("publish event IDs must be unique within a batch");
         }

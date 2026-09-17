@@ -102,6 +102,18 @@ function testPublisherRejectsDuplicateCorrelationIds() {
     test:assertTrue(result is error);
 }
 
+// Salesforce rejects an overlong ProducerEvent ID with a generic INTERNAL
+// response. Keep that server-side constraint at the local validation boundary.
+@test:Config {}
+function testPublisherRejectsOverlongCorrelationIds() {
+    error? result = validateUniquePublishEventIds([{
+        id: "1234567890123456789012345678901234567",
+        payload: {}
+    }]);
+
+    test:assertTrue(result is error);
+}
+
 // A lost Publish response is not retried. Its request-level error identifies
 // exactly the IDs that may already have been accepted by Salesforce, without
 // discarding definitive results already obtained for sibling events (for
@@ -110,7 +122,7 @@ function testPublisherRejectsDuplicateCorrelationIds() {
 function testAmbiguousPublishErrorIdentifiesSubmittedEvents() {
     PublishResult[] siblingResults = [{id: "second", replayId: [9]}];
     error<AmbiguousPublishDetail> result = ambiguousPublishError("/event/Order__e", ["first", "third"],
-        siblingResults, error("transport unavailable"));
+        siblingResults);
     AmbiguousPublishDetail detail = result.detail();
     test:assertEquals(result.message(), "ambiguous Publish outcome");
     test:assertEquals(detail.topic, "/event/Order__e");

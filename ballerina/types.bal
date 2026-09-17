@@ -54,7 +54,8 @@ public type Event record {|
 public type PublishEvent record {|
     # Dynamic event body to encode using the topic schema.
     Payload payload;
-    # Caller correlation ID. The connector generates one when omitted.
+    # Caller correlation ID, limited to 36 UTF-8 bytes by Salesforce. The
+    # connector generates a UUID when omitted.
     string? id = ();
 |};
 

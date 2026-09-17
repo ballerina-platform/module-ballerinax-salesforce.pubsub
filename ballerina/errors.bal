@@ -74,10 +74,9 @@ public type AmbiguousPublishDetail record {|
 # + topic - topic passed to the uncertain request
 # + eventIds - correlation IDs whose Publish RPC was ambiguous
 # + definitiveResults - results already obtained for every other submitted event
-# + cause - original transport failure, intentionally not retained in public detail
 # + return - structured request-level ambiguity error
-public isolated function ambiguousPublishError(string topic, string[] eventIds, PublishResult[] definitiveResults,
-        error cause) returns error<AmbiguousPublishDetail> {
+public isolated function ambiguousPublishError(string topic, string[] eventIds,
+        PublishResult[] definitiveResults) returns error<AmbiguousPublishDetail> {
     AmbiguousPublishSiblingResult[] siblings = [];
     foreach PublishResult result in definitiveResults {
         error? itemError = result.itemError;
