@@ -1293,7 +1293,8 @@ function testListenerRedeliversEventAfterCheckpointSaveFailure() returns error? 
     check secondEndpoint.attach(secondHandler, FIXTURE_TOPIC);
     check secondEndpoint.'start();
     check waitUntil(function() returns boolean {
-        return secondHandler.deliveryCount() >= 1;
+        byte[]|error? loaded = replayStore.load(checkpointKey);
+        return loaded is byte[] && loaded == [7, 8, 9];
     });
     check secondEndpoint.immediateStop();
     test:assertEquals(secondHandler.deliveryCount(), 1);
@@ -1623,13 +1624,13 @@ function testListenerMakesIndependentProgressAcrossTwoTopics() returns error? {
     check endpoint.attach(fastHandler, FIXTURE_MULTI_EVENT_TOPIC);
     check endpoint.'start();
     check waitUntil(function() returns boolean {
-        if fastHandler.deliveryCount() < 10 {
-            return false;
-        }
         byte[]|error? slowLoaded = replayStore.load({
             tenantId: "00DFixture000001", topic: FIXTURE_TOPIC, subscriptionName: "default"
         });
-        return slowLoaded is byte[] && slowLoaded == [7, 8, 9];
+        byte[]|error? fastLoaded = replayStore.load({
+            tenantId: "00DFixture000001", topic: FIXTURE_MULTI_EVENT_TOPIC, subscriptionName: "default"
+        });
+        return slowLoaded is byte[] && slowLoaded == [7, 8, 9] && fastLoaded is byte[] && fastLoaded == [<byte>10];
     }, 8);
     check endpoint.immediateStop();
 
