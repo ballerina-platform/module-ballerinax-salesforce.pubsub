@@ -17,12 +17,22 @@
  */
 
 import org.apache.tools.ant.taskdefs.condition.Os
+import org.gradle.process.ExecOperations
+
+import javax.inject.Inject
 
 plugins {
     id 'io.ballerina.plugin'
 }
 
 description = 'Salesforce Pub/Sub connector - Ballerina'
+
+abstract class ExecHelper {
+    @Inject
+    abstract ExecOperations getExecOperations()
+}
+
+def execHelper = project.objects.newInstance(ExecHelper)
 
 def packageName = "salesforce.pubsub"
 def packageOrg = "ballerinax"
@@ -49,7 +59,7 @@ ballerina {
     module = packageName
     langVersion = ballerinaLangVersion
     testCoverageParam = ""
-    isConnector = false
+    connector = false
     platform = "any"
 }
 
@@ -72,12 +82,12 @@ task resolveBallerinaDependencies(type: Exec) {
     dependsOn copyStdlibs
     dependsOn copyToLib
     workingDir project.projectDir
-    commandLine 'sh', '-c', "$buildDir/jballerina-tools-${ballerinaLangVersion}/bin/bal build"
+    commandLine 'sh', '-c', "${layout.buildDirectory.get().asFile}/jballerina-tools-${ballerinaLangVersion}/bin/bal build"
 }
 
 task commitTomlFiles {
     doLast {
-        project.exec {
+        execHelper.execOperations.exec {
             ignoreExitValue true
             if (Os.isFamily(Os.FAMILY_WINDOWS)) {
                 commandLine 'cmd', '/c', "git commit -m \"[Automated] Update the toml files\" Ballerina.toml Dependencies.toml"
